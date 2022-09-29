@@ -53,7 +53,7 @@ class SequenceSpaces {
  public:
   std::mutex mu;
   size_t nsequence_spaces;
-  uint64_t *sequence_spaces;  // [] doesn't compile...
+  uint64_t *sequence_spaces;
 
   explicit SequenceSpaces(size_t n) {
     sequence_spaces = new uint64_t[n];
@@ -70,7 +70,14 @@ class SequenceSpaces {
     mu.lock();
     for (size_t i = 0; i < nsequence_spaces; i++) {
       sequence_spaces[i] += seq_reqs[i].batch_size;
-      seq_reqs[i].seqnum = sequence_spaces[i] - 1;
+      if (seq_reqs[i].batch_size == 0) {
+        // sequencer returns batch_size as well
+        // batch_size of 0 means it will not allocate any numbers
+        // including 0
+        seq_reqs[i].seqnum = 0;
+      } else {
+        seq_reqs[i].seqnum = sequence_spaces[i] - 1;
+      }
     }
     mu.unlock();
   }
@@ -124,8 +131,8 @@ class AmoMapElem {
   bool assigned = false;
 
   // assigns new numbers or copies
-  inline bool
-  assign_numbers(SeqContext *c, seq_req_t _seq_reqs[]) {
+  inline bool assign_numbers(SeqContext *c,
+                             seq_req_t _seq_reqs[]) {
     if (!assigned) {
       c->sequence_spaces->allocate_seqnums(_seq_reqs);
       for (size_t i = 0; i < c->sequence_spaces->nsequence_spaces; i++) {

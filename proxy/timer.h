@@ -1,8 +1,6 @@
 #ifndef TIMER_H
 #define TIMER_H
 
-class Proxy; // why is this declared?
-
 class Timer {
  public:
   uint64_t timeout_us = 0;
@@ -16,7 +14,7 @@ class Timer {
 
   // Can explicitly init with null to have a timer with no cb
   void init(uint64_t to_us, void (*cb)(void *), void *a) {
-    freq_ghz = erpc::measure_rdtsc_freq();
+    freq_ghz = erpc::measure_rdtsc_freq(); // todo this might be expensive
     timeout_us = to_us;
     timeout_tsc = erpc::us_to_cycles(to_us, freq_ghz);
 
@@ -34,6 +32,10 @@ class Timer {
   void start() {
     prev_tsc = erpc::rdtsc();
     running = true;
+  }
+
+  __inline__ void reset() {
+    start();
   }
 
   // Change the callback

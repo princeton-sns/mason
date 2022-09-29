@@ -39,15 +39,30 @@ DEFINE_uint32(proxy_id, 0,
               "Proxy id");
 DEFINE_string(out_dir, "",
               "IP address for the proxy n");
-DEFINE_string(results_file, "",
-              "File to print results");
 DEFINE_uint64(nsequence_spaces, 0,
               "Total number of sequence spaces");
+DEFINE_double(create_percent, 0,
+              "Percent of create znode ops.");
+DEFINE_double(rename_percent, 0,
+              "Percent of rename znode ops.");
+DEFINE_double(write_percent, 0,
+              "Percent of write znode ops.");
+DEFINE_double(read_percent, 0,
+              "Percent of read znode ops.");
+DEFINE_double(delete_percent, 0,
+              "Percent of delete znode ops.");
+DEFINE_double(exists_percent, 0,
+              "Percent of exists ops.");
+DEFINE_double(get_children_percent, 0,
+              "Percent of get_children ops.");
+DEFINE_uint32(nzk_servers, 0,
+              "Number of CATSKeeper servers.");
 
 extern uint64_t nsequence_spaces;
+uint64_t nzk_shards;
 
 volatile bool force_quit = false;
-double failover_to = 1;
+double failover_to = 10;
 
 
 struct app_stats_t;
@@ -56,8 +71,13 @@ class Operation;
 class Tag;
 class ClientContext;
 
+typedef struct client_heartbeat_tag {
+  erpc::MsgBuffer req_mbuf;
+  erpc::MsgBuffer resp_mbuf;
+} client_heartbeat_tag_t;
+
 class Tag {
-public:
+ public:
   bool msgbufs_allocated = false;
   ClientContext *c;
   Operation *op;
@@ -72,7 +92,7 @@ public:
 
 
 class Operation {
-public:
+ public:
   ReqType reqtype;
   client_reqid_t local_reqid;  // client-assigned reqid
   size_t local_idx;  // Index into ops array
@@ -84,6 +104,7 @@ public:
   }
 
   void reset(client_reqid_t local_reqid) {
+    reqtype = static_cast<ReqType>(0);
     this->local_reqid = local_reqid;
   }
 };
@@ -95,21 +116,16 @@ struct CmpReqIds {
   }
 };
 
-enum State {
-  warmup,
-  experiment,
-  cooldown,
-};
-
 class ClientContext : public ThreadContext {
-public:
+ public:
   // For stats
   struct timespec tput_t0;  // Throughput start time
   app_stats_t *app_stats;
   size_t stat_resp_rx_tot = 0;
-  State state;
 
   uint16_t client_id;
+
+  std::vector<std::string> current_ephemeral_nodes;
 
   std::vector<int> sessions;
 
@@ -118,9 +134,12 @@ public:
   uint16_t proxy_id;
   client_reqid_t reqid_counter = 0;
 
+  uint64_t client_connection_counter = 0;
+
   client_reqid_t highest_cons_reqid = -1;
-  std::priority_queue<client_reqid_t, std::vector<client_reqid_t>,
-      CmpReqIds> done_req_ids;
+  std::priority_queue<client_reqid_t, std::vector<client_reqid_t>, CmpReqIds> done_req_ids;
+  size_t ncreated_pathnames = 0;
+  std::vector<std::string> path_names;
 
   bool alive_reps[3];
 
@@ -134,6 +153,22 @@ public:
   size_t last_retx[MAX_CONCURRENCY];
 
   AppMemPool<Tag> tag_pool;
+
+  void ping_connections();
+
+  std::string str() {
+    std::ostringstream str;
+    str << thread_id << ", " << client_id;
+    return str.str();
+  }
+
+  std::string &get_random_path() {
+    size_t idx = static_cast<size_t>(random()) %
+        (path_names.size() + current_ephemeral_nodes.size());
+    if (idx < path_names.size())
+      return path_names.at(idx);
+    return current_ephemeral_nodes.at(idx % path_names.size());
+  }
 
   void allocate_ops() {
     for (size_t i = 0; i < FLAGS_concurrency; i++) {
@@ -149,8 +184,8 @@ public:
         op->cur_px_conn = (op->cur_px_conn + 1) % 3;
         // always true
         if (this->alive_reps[op->cur_px_conn]) {
-        debug_print(1, "[%zu] Switching from %zu to %zu, op %zu\n",
-                    thread_id, tmp, op->cur_px_conn, op->local_idx);
+          debug_print(1, "[%zu] Switching from %zu to %zu, op %zu\n",
+                      thread_id, tmp, op->cur_px_conn, op->local_idx);
 
           // set all ops to be the same proxy and only change if I'm op 0
           for (size_t j = 0; j < FLAGS_concurrency; j++) {
@@ -162,6 +197,22 @@ public:
     }
   }
 
+  void delete_connection() {
+    current_ephemeral_nodes.clear();
+    client_connection_counter++;
+  }
+
+  void push_and_update_highest_cons_req_id(client_reqid_t rid) {
+    done_req_ids.push(rid);
+    while (!done_req_ids.empty() &&
+        (done_req_ids.top() == highest_cons_reqid + 1 ||
+            done_req_ids.top() == highest_cons_reqid)) { // handle duplicates...
+      highest_cons_reqid = done_req_ids.top();
+      done_req_ids.pop();
+    }
+  }
+
+  void print_stats();
   ~ClientContext() {
     LOG_INFO("Destructing the client context for %zu\n", thread_id);
     for (size_t i = 0; i < FLAGS_concurrency; i++) {
@@ -170,17 +221,6 @@ public:
     free(stats);
   }
 
-  void push_and_update_highest_cons_req_id(client_reqid_t rid) {
-    done_req_ids.push(rid);
-    while (!done_req_ids.empty() &&
-           (done_req_ids.top() == highest_cons_reqid + 1 ||
-            done_req_ids.top() == highest_cons_reqid)) { // handle duplicates...
-      highest_cons_reqid = done_req_ids.top();
-      done_req_ids.pop();
-    }
-  }
-
-  void print_stats();
 };
 
 
@@ -189,132 +229,18 @@ Tag::alloc_msgbufs(ClientContext *_c, Operation *_op) {
   this->c = _c;
   this->op = _op;
 
-  size_t bufsize = client_payload_size( nsequence_spaces);
+  size_t bufsize = client_payload_size();
+
 
   if (!msgbufs_allocated) {
     req_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
-    resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
+    // may need to make a smaller limit for response size
+    resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(kMaxClientResponseSize);
     msgbufs_allocated = true;
   }
+
 }
 
 
-Tag::~Tag() {}
-
-// added for more accurate timing
-const int SEC_TIMER_US = 1000000;
-class Timer {
- public:
-  uint64_t timeout_us = 0;
-  uint64_t timeout_tsc = 0;
-  uint64_t prev_tsc = 0;
-  uint64_t diff_tsc;
-  double freq_ghz;
-  bool running = false;
-  void (*callback)(void *);  // The function to call when timer runs out
-  void *arg;
-
-  // Can explicitly init with null to have a timer with no cb
-  void init(uint64_t to_us, void (*cb)(void *), void *a) {
-    freq_ghz = erpc::measure_rdtsc_freq();
-    timeout_us = to_us;
-    timeout_tsc = erpc::us_to_cycles(to_us, freq_ghz);
-
-    callback = cb;
-    arg = a;
-    running = false;
-  }
-
-  void set_cb (void (*cb)(void *), void *a) {
-    callback = cb;
-    arg = a;
-  }
-
-  // Maintain the callback
-  void start() {
-    prev_tsc = erpc::rdtsc();
-    running = true;
-  }
-
-  // Change the callback
-  void start(void (*cb)(void *)) {
-    callback = cb;
-    start();
-  }
-
-  void stop() {
-    running = false;
-  }
-
-  void change_period(uint64_t to_us) {
-    timeout_us = to_us;
-    timeout_tsc = erpc::us_to_cycles(to_us, freq_ghz);
-  }
-
-  // If the timer has run out, call the callback
-  void check() {
-    if (!running) {
-      return;
-    }
-
-    uint64_t curr_tsc = erpc::rdtsc();
-    if (curr_tsc - prev_tsc > timeout_tsc) {
-      stop();
-      erpc::rt_assert(callback != nullptr, "Timer with null cb expired!\n");
-      callback(arg);
-    }
-  }
-
-  bool expired() {
-    if (!running) return false;
-    uint64_t curr_tsc = erpc::rdtsc();
-    return curr_tsc - prev_tsc > timeout_tsc;
-  }
-
-  bool expired_reset() {
-    if (!running) return false;
-    uint64_t curr_tsc = erpc::rdtsc();
-    if (curr_tsc - prev_tsc > timeout_tsc) {
-      start(); return true;
-    }
-    return false;
-  }
-
-  bool expired_stop() {
-    if (!running) return false;
-    uint64_t curr_tsc = erpc::rdtsc();
-    if (curr_tsc - prev_tsc > timeout_tsc) {
-      running = false;
-      return true;
-    }
-    return false;
-  }
-
-  // set_cb MUST be reset after deserialization
-  template<class Archive>
-  void serialize(Archive & ar, const unsigned int) {
-    ar & freq_ghz;
-    ar & timeout_us;
-    ar & timeout_tsc;
-    ar & prev_tsc;
-    ar & diff_tsc;
-    ar & running;
-  }
-};
-
-// Hacky but need to be able to run event loop over smaller timescales
-// This is currently broken for some reason.
-inline void
-run_event_loop_us(erpc::Rpc<erpc::CTransport> *rpc, size_t timeout_us)
-{
-  static auto freq_ghz = erpc::measure_rdtsc_freq();
-  size_t timeout_tsc = erpc::us_to_cycles(timeout_us, freq_ghz);
-  size_t start_tsc = erpc::rdtsc();  // For counting timeout_us
-  size_t now;
-
-  while (true) {
-    rpc->run_event_loop_once();
-    now = erpc::dpath_rdtsc();
-    if (unlikely(now - start_tsc > timeout_tsc)) break;
-  }
+Tag::~Tag() {
 }

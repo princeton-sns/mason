@@ -5,15 +5,23 @@ std::string proxy_ip;
 uint32_t offset;  // For recovery
 
 static constexpr uint8_t kWarmup = 4;
-static constexpr double kAppLatFac = 3.0;        // Precision factor for latency
+// Precision factor for latency
+static constexpr double kAppLatFac = 2.0;
 volatile bool experiment_over = false;
 size_t numa_node = 0;
 
 static void op_cont_func(void *, void *);
-
+std::set<uint8_t> get_shards(ClientContext *);
+void set_shards(std::set<uint8_t> &, uint8_t*);
 
 uint64_t nsequence_spaces;
-
+double create_percent;
+double rename_percent;
+double write_percent;
+double read_percent;
+double delete_percent;
+double exists_percent;
+double get_children_percent;
 
 // Handle connections initiated by us
 void
@@ -22,26 +30,26 @@ sm_handler(int session_num __attribute__((unused)),
            erpc::SmErrType sm_err_type, void *_context) {
   auto *c = static_cast<ClientContext *>(_context);
 
-  LOG_INFO("thread_id %zu: ", c->thread_id);
+  LOG_INFO("Thread_id %zu: ", c->thread_id);
 
   erpc::rt_assert(
       sm_err_type == erpc::SmErrType::kNoError,
       "Got a SM error: " + erpc::sm_err_type_str(sm_err_type));
 
   if (!(sm_event_type == erpc::SmEventType::kConnected ||
-        sm_event_type == erpc::SmEventType::kDisconnected)) {
+      sm_event_type == erpc::SmEventType::kDisconnected)) {
     throw std::runtime_error("Unexpected SM event!");
   }
 
   if (sm_event_type == erpc::SmEventType::kConnected) {
-    LOG_INFO("Got a connection, session %d!\n", session_num);
     c->nconnections++;
+    LOG_INFO("Got a connection, session %d! nconnections %zu\n",
+             session_num, c->nconnections);
   } else {
     LOG_INFO("Lost a connection, session %d!\n", session_num);
     c->nconnections--;
   }
 }
-
 
 // Lifted nearly verbatim from erpc code:
 // https://github.com/erpc-io/eRPC/blob/master/apps/small_rpc_tput/small_rpc_tput.cc
@@ -66,10 +74,10 @@ struct app_stats_t {
 
   std::string to_string() {
     return std::to_string(mrps) + "," + std::to_string(lat_us_50) +
-           "," + std::to_string(lat_us_99)
-           + "," + std::to_string(lat_us_999)
-           + "," + std::to_string(lat_us_9999)
-           + "," + std::to_string(num_re_tx);
+        "," + std::to_string(lat_us_99)
+        + "," + std::to_string(lat_us_999)
+        + "," + std::to_string(lat_us_9999)
+        + "," + std::to_string(num_re_tx);
   }
 
   /// Accumulate stats
@@ -83,7 +91,6 @@ struct app_stats_t {
     return *this;
   }
 };
-
 
 // Lifted (almost) verbatim from erpc code:
 // https://github.com/erpc-io/eRPC/blob/master/apps/small_rpc_tput/small_rpc_tput.cc
@@ -123,72 +130,232 @@ ClientContext::print_stats() {
 
 // A way to record sequence numbers + timestamps for noops
 void
-noop_handler(erpc::ReqHandle *req_handle, void *_context) {
-  auto *c = reinterpret_cast<ClientContext *>(_context);
+noop_handler(erpc::ReqHandle *, void *) {
+  erpc::rt_assert(false, "should not receive noops\n");
+}
+
+// A way to record sequence numbers + timestamps for noops
+void
+watch_notification_handler(erpc::ReqHandle *req_handle, void *_c) {
   const erpc::MsgBuffer *req_msgbuf = req_handle->get_req_msgbuf();
+  erpc::rt_assert(req_msgbuf->get_data_size() == sizeof(watch_notification_t),
+                  "Watch notification wrong size\n");
+  auto *c = reinterpret_cast<ClientContext *>(_c);
 
-  fmt_rt_assert(req_handle->get_req_msgbuf()->get_data_size() ==
-                client_payload_size(nsequence_spaces),
-                "noop message not the right size should be %zu is %zu\n",
-                client_payload_size(nsequence_spaces),
-                req_handle->get_req_msgbuf()->get_data_size());
-
-  auto *payload = reinterpret_cast<client_payload_t *>(
-      req_msgbuf->buf);
-  erpc::rt_assert(payload->reqtype == ReqType::kNoop,
-                  "Got a non-noop request type in the handler!\n");
-
-  if (DEBUG_SEQNUMS) {
-    size_t batch_size = 0;
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      batch_size = payload->seq_reqs[0].batch_size;
-      // they should all have the same batch size for now...
-      erpc::rt_assert(batch_size == payload->seq_reqs[j].batch_size);
-    }
-
-    std::string lines;
-    for (size_t j = 0; j < batch_size; j++) {
-      lines += get_formatted_time_from_offset(offset);
-      for (size_t k = 0; k < nsequence_spaces; k++) {
-        lines += " " + std::to_string(payload->seq_reqs[k].seqnum);
-      }
-      lines += " \n";
-    }
-    fprintf(c->fp, "%s", lines.c_str());
-  } else if (PLOT_RECOVERY) {
-    print_seqreqs(payload->seq_reqs, nsequence_spaces);
-    std::string time = get_formatted_time_from_offset(offset);
-    std::string line;
-    seq_req_t *sr = payload->seq_reqs;
-    size_t max_bs = 0;
-    for (size_t i = 0; i < nsequence_spaces; i++) {
-      max_bs = max_bs < sr[i].batch_size ? sr[i].batch_size : max_bs;
-    }
-
-    while (max_bs > 0) {
-      line += time;
-      for (size_t i = 0; i < nsequence_spaces; i++) {
-        line += " ";
-        if (sr[i].batch_size > 0) {
-          line += std::to_string(sr[i].seqnum);
-          sr[i].seqnum--;
-          sr[i].batch_size--;
-        } else {
-          line += "0";
-        }
-      }
-      line += "\n";
-      max_bs--;
-    }
-    LOG_ERROR("cid %d got noops: %s\n", c->client_id, line.c_str());
-    fprintf(c->fp, "%s", line.c_str());
-  }
-
-  c->rpc->resize_msg_buffer(
-      &req_handle->pre_resp_msgbuf, 1);
+  c->rpc->resize_msg_buffer(&req_handle->pre_resp_msgbuf, 1);
   c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
 }
 
+void send_delete_client_connection(ClientContext *, Operation *, Tag *);
+void send_create_node(ClientContext *c, Operation *op, Tag *tag,
+                      CreateNodeOptions options = CreateNodeOptions::kPersistent) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  // choose a random path_name
+  size_t pidx = static_cast<size_t>(random()) % c->path_names.size();
+  std::string path(c->path_names[pidx]);
+  for (size_t j = 9; j < 16; j++) {
+    path[j] = random() % 26 + 'A' + random() % 2 * 32;
+  }
+  // changing path name was here
+  op->reqtype = ReqType::kCreateZNode; // local state
+
+  // set up payload
+  payload->reqtype = ReqType::kCreateZNode;
+  payload->zk_payload.create_node.client_id = c->client_id;
+  strcpy(payload->zk_payload.create_node.name, path.c_str());
+  payload->zk_payload.create_node.client_connection_id =
+      c->client_connection_counter;
+
+  // limit the number of concurrent ephemeral nodes
+  if (c->current_ephemeral_nodes.size() < 7) {
+    LOG_CLIENT("Creating ephemeral node %s\n", path.c_str());
+    c->current_ephemeral_nodes.push_back(path);
+    options = CreateNodeOptions::kEphemeral;
+
+    // active connection needs to tell every shard we have an eph node with
+    auto shards = get_shards(c);
+    payload->zk_payload.create_node.nshards = shards.size();
+    set_shards(shards, payload->zk_payload.create_node.shards);
+  } else {
+    // only change it if it is not ephemeral, ephemeral store in curr_eph_nodes
+    c->path_names[pidx] = path;
+    options = CreateNodeOptions::kPersistent;
+  }
+
+  payload->zk_payload.create_node.options = options;
+  *reinterpret_cast<uint64_t *>(payload->zk_payload.create_node.data) = 1337;
+
+  // add as ephemeral node. this should probably be in the response?
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void send_delete_client_connection(ClientContext *c, Operation *op, Tag *tag) {
+  // client metadata is already setup
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  LOG_CLIENT("%s: sending delete_client_connection %zu\n", c->str().c_str(),
+           c->client_connection_counter);
+
+  op->reqtype = ReqType::kDeleteClientConnection;
+
+  payload->reqtype = ReqType::kDeleteClientConnection;
+  payload->zk_payload.delete_client_connection.client_connection_id = c->client_connection_counter;
+  payload->zk_payload.delete_client_connection.client_id = c->client_id;
+
+  std::set<uint8_t> shards = get_shards(c);
+  payload->zk_payload.delete_client_connection.nshards = shards.size();
+  set_shards(shards, payload->zk_payload.delete_client_connection.shards);
+
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+
+}
+
+void send_write_node(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  // choose the path to send the write to
+  size_t pidx = static_cast<size_t>(random()) % c->path_names.size();
+  std::string path(c->path_names[pidx]);
+
+  // setup local state
+  op->reqtype = ReqType::kWriteZNode;
+
+  // setup payload
+  payload->reqtype = ReqType::kWriteZNode;
+  payload->zk_payload.write_node.version = -1;
+  strcpy(payload->zk_payload.write_node.name, path.c_str());
+  *reinterpret_cast<uint64_t *>(payload->zk_payload.write_node.data) = 1338;
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void send_read_node(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  std::string &path(c->get_random_path());
+
+  // setup local state
+  op->reqtype = ReqType::kReadZNode;
+
+  // setup payload
+  payload->reqtype = ReqType::kReadZNode;
+  strcpy(payload->zk_payload.read_node.name, path.c_str());
+  payload->zk_payload.read_node.watch = true;
+  payload->zk_payload.read_node.client_id = c->client_id;
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void send_rename_node(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  static bool first = true;
+  std::string path;
+  size_t pidx = static_cast<size_t>(random()) % c->path_names.size();
+  if (first) {
+    path = c->path_names[0];
+    first = false;
+  } else {
+    // choose the path to send the rename to
+    path = c->path_names[pidx];
+    for (size_t j = 9; j < 16; j++) {
+      path[j] = random() % 26 + 'A' + random() % 2 * 32;
+    }
+  }
+  // setup local state
+  op->reqtype = ReqType::kRenameZNode;
+
+  // setup payload
+  payload->reqtype = ReqType::kRenameZNode;
+  strcpy(payload->zk_payload.rename_node.from, c->path_names[pidx].c_str());
+  c->path_names[pidx] = path; // store new path locally
+  strcpy(payload->zk_payload.rename_node.to, c->path_names[pidx].c_str());
+
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void send_delete_node(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  std::string &path(c->get_random_path());
+
+  // setup local state
+  op->reqtype = ReqType::kDeleteZNode;
+
+  // setup payload
+  payload->reqtype = ReqType::kDeleteZNode;
+  payload->zk_payload.delete_node.version = -1;
+  strcpy(payload->zk_payload.delete_node.name, path.c_str());
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void send_exists(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  std::string &path(c->get_random_path());
+
+  // setup local state
+  op->reqtype = ReqType::kExists;
+
+  // setup payload
+  payload->reqtype = ReqType::kExists;
+  strcpy(payload->zk_payload.exists.name, path.c_str());
+  payload->zk_payload.exists.watch = true;
+  payload->zk_payload.exists.client_id = c->client_id;
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void send_get_children(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+
+  // choose the path to send the read to
+  size_t pidx = static_cast<size_t>(random()) % c->path_names.size();
+  std::string path(c->path_names[pidx]);
+  path.resize(path.find_first_of('/', 1));
+
+  // setup local state
+  op->reqtype = ReqType::kGetChildren;
+
+  // setup payload
+  payload->reqtype = ReqType::kGetChildren;
+  strcpy(payload->zk_payload.get_children.name, path.c_str());
+  payload->zk_payload.get_children.watch = true;
+  payload->zk_payload.get_children.client_id = c->client_id;
+
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          op_cont_func, reinterpret_cast<void *>(tag));
+}
+
+void
+resend_request(ClientContext *c, Operation *op, Tag *tag) {
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+  LOG_CLIENT("Resending type %u\n", static_cast<uint8_t>(payload->reqtype));
+  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                          static_cast<uint8_t>(payload->reqtype), &tag->req_msgbuf,
+                          &tag->resp_msgbuf, op_cont_func, tag);
+}
 
 void
 send_request(ClientContext *c, Operation *op, bool new_request) {
@@ -201,26 +368,199 @@ send_request(ClientContext *c, Operation *op, bool new_request) {
   Tag *tag = c->tag_pool.alloc();
   tag->alloc_msgbufs(c, op);
 
-  auto *payload =
-      reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+  auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
 
   payload->client_id = c->client_id;
   payload->client_reqid = op->local_reqid;
   payload->proxy_id = c->proxy_id;
   payload->highest_recvd_reqid = c->highest_cons_reqid;
 
-  // for now just ask for one number from each sequence space
-  for (size_t j = 0; j < nsequence_spaces; j++) {
-    payload->seq_reqs[j].seqnum = 0;
-    payload->seq_reqs[j].batch_size = 1;
+  // the first request must establish root
+  if (payload->client_reqid == 0) {
+    LOG_INFO("Creating root.\n");
+    op->reqtype = ReqType::kCreateZNode;
+    payload->reqtype = ReqType::kCreateZNode;
+    sprintf(payload->zk_payload.create_node.name, "/");
+    payload->zk_payload.create_node.version = 0;
+    payload->zk_payload.create_node.options = CreateNodeOptions::kPersistent;
+    payload->zk_payload.create_node.client_id = c->client_id;
+    *reinterpret_cast<uint64_t *>(payload->zk_payload.create_node.data) = 1337;
+
+    c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                            static_cast<uint8_t>(payload->reqtype),
+                            &tag->req_msgbuf, &tag->resp_msgbuf,
+                            op_cont_func, reinterpret_cast<void *>(tag));
+    return;
   }
 
-  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
-                          static_cast<uint8_t>(ReqType::kExecuteOpA),
-                          &tag->req_msgbuf, &tag->resp_msgbuf,
-                          op_cont_func, reinterpret_cast<void *>(tag));
-}
+  static bool first = true;
+  if (c->ncreated_pathnames < c->path_names.size()) {
+    // todo remove this block. to test watch kNodeCreated
+    if (first) {
+      // path doesn't exist yet, should return false and then get a watch
+      // notification when it gets triggered by the next request
+      first = false;
+      auto *payload = reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
 
+      // choose the path to send the read to
+      size_t pidx = 0;
+      std::string path(c->path_names[pidx]);
+
+      // setup local state
+      op->reqtype = ReqType::kExists;
+
+      // setup payload
+      payload->reqtype = ReqType::kExists;
+      strcpy(payload->zk_payload.exists.name, path.c_str());
+      payload->zk_payload.exists.watch = true;
+      payload->zk_payload.exists.client_id = c->client_id;
+      LOG_CLIENT("About to submit exists for path %s\n",
+               payload->zk_payload.exists.name);
+      c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                              static_cast<uint8_t>(ReqType::kExists),
+                              &tag->req_msgbuf, &tag->resp_msgbuf,
+                              op_cont_func, reinterpret_cast<void *>(tag));
+      // increment then rename some future node to this one to check kNodeRenamed
+      c->ncreated_pathnames++;
+      return;
+    }
+
+    op->reqtype = ReqType::kCreateZNode;
+    payload->reqtype = ReqType::kCreateZNode;
+    strcpy(payload->zk_payload.create_node.name,
+           c->path_names[c->ncreated_pathnames].c_str());
+    payload->zk_payload.create_node.version = 0;
+    *reinterpret_cast<uint64_t *>(payload->zk_payload.create_node.data) = 1337;
+
+    LOG_INFO("Initializing znode with path %s\n",
+             payload->zk_payload.create_node.name);
+    c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                            static_cast<uint8_t>(ReqType::kCreateZNode),
+                            &tag->req_msgbuf, &tag->resp_msgbuf,
+                            op_cont_func, reinterpret_cast<void *>(tag));
+    c->ncreated_pathnames++; // todo original
+    return;
+  }
+
+  double x = random() / static_cast<double>(RAND_MAX);
+  double sum = 0;
+  if (sum < x && x <= (sum += create_percent) && create_percent) {
+    send_create_node(c, op, tag);
+  } else if (sum < x && x <= (sum += rename_percent) && rename_percent) {
+    send_rename_node(c, op, tag);
+  } else if (sum < x && x <= (sum += write_percent) && write_percent) {
+    send_write_node(c, op, tag);
+  } else if (sum < x && x <= (sum += read_percent) && read_percent) {
+    send_read_node(c, op, tag);
+  } else if (sum < x && x <= (sum += delete_percent) && delete_percent) {
+    send_delete_node(c, op, tag);
+  } else if (sum < x && x <= (sum += exists_percent) && exists_percent) {
+    send_exists(c, op, tag);
+  } else if (sum < x && x <= (sum += get_children_percent) && get_children_percent) {
+    send_get_children(c, op, tag);
+  }
+  return;
+
+  send_create_node(c, op, tag);
+  return;
+  erpc::rt_assert(false, "impossible");
+
+  if (x > rename_percent) {
+    payload->reqtype = ReqType::kCreateZNode;
+    // choose a random path_name
+    size_t pidx = static_cast<size_t>(random()) % c->path_names.size();
+    std::string path(c->path_names[pidx]);
+    // choose new name
+//    for (size_t j = 9; j < 16; j++) {
+//      path[j] = random() % 26 + 'A' + random() % 2 * 32;
+//    }
+//    c->path_names[pidx] = path;
+//    strcpy(payload->zk_payload.create_node.name, path.c_str());
+//    *reinterpret_cast<uint64_t *>(payload->zk_payload.create_node.data) =
+//        1337;
+//
+//    c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+//                            static_cast<uint8_t>(ReqType::kCreateZNode),
+//                            &tag->req_msgbuf, &tag->resp_msgbuf,
+//                            op_cont_func, reinterpret_cast<void *>(tag));
+
+//    // DELETE PATH
+//      payload->reqtype = ReqType::kDeleteZNode;
+//      op->reqtype = ReqType::kDeleteZNode;
+////      payload->zk_payload.write_node.data = 1338;
+//
+//      strcpy(payload->zk_payload.delete_node.name, path.c_str());
+////      *reinterpret_cast<uint64_t *>(payload->zk_payload.write_node.data) = 1338;
+////      LOG_INFO("About to submit delete for path %s data\n",
+////               payload->zk_payload.delete_node.name);
+//      c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+//                              static_cast<uint8_t>(ReqType::kDeleteZNode),
+//                              &tag->req_msgbuf, &tag->resp_msgbuf,
+//                              op_cont_func, reinterpret_cast<void *>(tag));
+
+    // WRITE PATH
+    payload->reqtype = ReqType::kWriteZNode;
+
+    // write path
+    payload->zk_payload.write_node.version = -1;
+    op->reqtype = ReqType::kWriteZNode;
+    strcpy(payload->zk_payload.write_node.name, path.c_str());
+    *reinterpret_cast<uint64_t *>(payload->zk_payload.write_node.data) = 1338;
+    c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                            static_cast<uint8_t>(ReqType::kWriteZNode),
+                            &tag->req_msgbuf, &tag->resp_msgbuf,
+                            op_cont_func, reinterpret_cast<void *>(tag));
+    return;
+  } else { // rename path
+    payload->reqtype = ReqType::kRenameZNode;
+
+    // pick path
+    size_t pidx = static_cast<size_t>(random()) % c->path_names.size();
+    std::string path(c->path_names[pidx]);
+    printf("for rename path is %s\n", path.c_str());
+    if (1) { // need to find a better way to test things...
+      // READ PATH
+      payload->reqtype = ReqType::kReadZNode;
+      op->reqtype = ReqType::kReadZNode;
+
+      strcpy(payload->zk_payload.read_node.name, path.c_str());
+      c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                              static_cast<uint8_t>(ReqType::kReadZNode),
+                              &tag->req_msgbuf, &tag->resp_msgbuf,
+                              op_cont_func, reinterpret_cast<void *>(tag));
+
+      // DELETE PATH
+//      payload->reqtype = ReqType::kDeleteZNode;
+//      op->reqtype = ReqType::kDeleteZNode;
+////      payload->zk_payload.write_node.data = 1338;
+//
+//      strcpy(payload->zk_payload.delete_node.name, path.c_str());
+////      *reinterpret_cast<uint64_t *>(payload->zk_payload.write_node.data) = 1338;
+////      LOG_INFO("About to submit delete for path %s data\n",
+////               payload->zk_payload.delete_node.name);
+//      c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+//                              static_cast<uint8_t>(ReqType::kDeleteZNode),
+//                              &tag->req_msgbuf, &tag->resp_msgbuf,
+//                              op_cont_func, reinterpret_cast<void *>(tag));
+    } else {
+      // randomize next name
+      for (size_t j = 9; j < 16; j++) {
+        path[j] = random() % 26 + 'A' + random() % 2 * 32;
+      }
+      strcpy(payload->zk_payload.rename_node.from, c->path_names[pidx].c_str());
+      printf("Trying to rename from %s to %s\n",
+             payload->zk_payload.rename_node.from, path.c_str());
+      c->path_names[pidx] = path;
+      strcpy(payload->zk_payload.rename_node.to, c->path_names[pidx].c_str());
+
+      c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
+                              static_cast<uint8_t>(ReqType::kRenameZNode),
+                              &tag->req_msgbuf, &tag->resp_msgbuf,
+                              op_cont_func, reinterpret_cast<void *>(tag));
+    }
+    return;
+  }
+}
 
 void
 op_cont_func(void *_context, void *_tag) {
@@ -246,15 +586,15 @@ op_cont_func(void *_context, void *_tag) {
   //   increment cur_px_conn (%3) if not already done so. And try the next proxy.
   if (unlikely(payload->not_leader)) {
     LOG_ERROR("[%zu] op: lid %zu, cid %zu response not leader from %zu\n",
-                 c->thread_id, op->local_reqid,
-                 op->local_idx, op->cur_px_conn);
+              c->thread_id, op->local_reqid,
+              op->local_idx, op->cur_px_conn);
+    // sometimes print 0 after dead...
 
     c->next_proxy(op);
 
     if (!force_quit) {
-      send_request(c, op, false);
+      resend_request(c, op, tag);
     }
-    c->tag_pool.free(tag);
     return;
   }
 
@@ -274,73 +614,27 @@ op_cont_func(void *_context, void *_tag) {
     return;
   }
 
-  if (DEBUG_SEQNUMS) {
-    size_t batch_size = 0;
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      batch_size = payload->seq_reqs[0].batch_size;
-      // they should all have the same batch size for now...
-      erpc::rt_assert(batch_size == payload->seq_reqs[j].batch_size);
-    }
-
-    std::string lines;
-    for (size_t j = 0; j < batch_size; j++) {
-      lines += get_formatted_time_from_offset(offset);
-      for (size_t k = 0; k < nsequence_spaces; k++) {
-        lines += " " + std::to_string(payload->seq_reqs[k].seqnum);
-      }
-      lines += " \n";
-    }
-    fprintf(c->fp, "%s", lines.c_str());
-  } else if (PLOT_RECOVERY) {
-    std::string time = get_formatted_time_from_offset(offset);
-    std::string line;
-    seq_req_t *sr = payload->seq_reqs;
-    size_t max_bs = 0;
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      max_bs = max_bs < sr[j].batch_size ? sr[j].batch_size : max_bs;
-    }
-
-    while (max_bs > 0) {
-      line += time;
-      for (size_t j = 0; j < nsequence_spaces; j++) {
-        line += " ";
-        if (sr[j].batch_size > 0) {
-          line += std::to_string(sr[j].seqnum);
-          sr[j].seqnum--;
-          sr[j].batch_size--;
-        } else {
-          line += "0";
-        }
-      }
-      line += "\n";
-      max_bs--;
-    }
-    fprintf(c->fp, "%s", line.c_str());
-  }
-
   // good response, record req_id and update highest_cons_reqid
   c->push_and_update_highest_cons_req_id(payload->client_reqid);
 
-  if (unlikely(payload->seq_reqs[0].seqnum % 1000000 == 0)) {
-    LOG_INFO("Thread %zu: Got seqnums for local_reqid %zu, "
-             "idx %zu from node %zu latency %f\n",
+  if (unlikely(payload->client_reqid % 10000 == 0)) {
+    LOG_INFO(
+        "Thread %zu: Got seqnums for local_reqid %zu, idx %zu "
+        "from node %zu latency %f\n",
         c->thread_id, payload->client_reqid, i, op->cur_px_conn,
         erpc::to_usec(tsc_now - c->req_tsc[i], c->rpc->get_freq_ghz()));
-    print_seqreqs(payload->seq_reqs, nsequence_spaces);
-    LOG_INFO("Thread %zu: highest_cons_req_id %zu\n", c->thread_id,
-             c->highest_cons_reqid);
+    LOG_INFO("Thread %zu: highest_cons_req_id %zu\n",
+             c->thread_id, c->highest_cons_reqid);
   }
 
   // Create the new op
   if (likely(!force_quit && !experiment_over)) {
-    // Record latency info
-    if (likely(c->state == State::experiment)) {
-      size_t req_tsc = c->req_tsc[i];
-      double req_lat_us = erpc::to_usec(tsc_now - req_tsc,
-                                        c->rpc->get_freq_ghz());
-      c->latency.update(static_cast<size_t>(req_lat_us * kAppLatFac));
-      c->stat_resp_rx_tot++;
-    }
+    // Record latency
+    size_t req_tsc = c->req_tsc[i];
+    double req_lat_us =
+        erpc::to_usec(tsc_now - req_tsc, c->rpc->get_freq_ghz());
+    c->latency.update(static_cast<size_t>(req_lat_us * kAppLatFac));
+    c->stat_resp_rx_tot++;
 
     c->ops[i]->reset(c->reqid_counter++);
     send_request(c, op, true);
@@ -350,13 +644,11 @@ op_cont_func(void *_context, void *_tag) {
   c->tag_pool.free(tag);
 }
 
-
 // Initialize state needed for client operation
 void
 create_client(ClientContext *c) {
   (void) c;
 }
-
 
 void
 establish_proxy_connection(ClientContext *c, int remote_tid,
@@ -379,7 +671,6 @@ establish_proxy_connection(ClientContext *c, int remote_tid,
   LOG_INFO("Thread %zu: connected!\n", c->thread_id);
 }
 
-
 uint16_t
 get_client_id(size_t thread_id) {
   std::istringstream ss(my_ip);
@@ -395,6 +686,59 @@ get_client_id(size_t thread_id) {
   return client_id;
 }
 
+void ping_cont_func(void *_c, void *_t) {
+  auto *c = reinterpret_cast<ClientContext *>(_c);
+  auto *tag = reinterpret_cast<client_heartbeat_tag *>(_t);
+  client_heartbeat_resp_t *chresp = reinterpret_cast<client_heartbeat_resp_t *>(
+      tag->resp_mbuf.buf);
+  LOG_CLIENT("Got client_heartbeat_resp deleted %d connection num %zu\n",
+           chresp->deleted, chresp->client_connection_number);
+
+  if (chresp->deleted &&
+      chresp->client_connection_number == c->client_connection_counter) {
+    LOG_CLIENT("Actually deleting connection: deleted %d connection num %zu\n",
+             chresp->deleted, chresp->client_connection_number);
+    c->delete_connection();
+  }
+
+  c->rpc->free_msg_buffer(tag->req_mbuf);
+  c->rpc->free_msg_buffer(tag->resp_mbuf);
+}
+
+std::set<uint8_t> get_shards(ClientContext *c) {
+  std::set<uint8_t> shards;
+  for (std::string path : c->current_ephemeral_nodes) {
+    shards.insert(znode_to_shard_idx(path, 3));
+  }
+  return shards;
+}
+// set_shards defined in common.h
+void ClientContext::ping_connections() {
+  if (current_ephemeral_nodes.empty()) return;
+
+  // can probably just maintain this
+  std::set<uint8_t> shards = get_shards(this);
+
+  auto *tag = new client_heartbeat_tag_t;
+  tag->req_mbuf = rpc->alloc_msg_buffer_or_die(
+      sizeof_client_heartbeat(shards.size()));
+  tag->resp_mbuf = rpc->alloc_msg_buffer_or_die(sizeof(client_heartbeat_resp_t));
+
+  auto *ch = reinterpret_cast<client_heartbeat_t *>(tag->req_mbuf.buf);
+  ch->client_id = client_id;
+  ch->proxy_id = proxy_id;
+  ch->nshards = shards.size();
+  ch->client_connection_number = client_connection_counter;
+  set_shards(shards, ch->shards);
+  LOG_CLIENT("sending heartbeat to proxy_id %u\n", ch->proxy_id);
+
+  rpc->enqueue_request(ops[0]->cur_px_conn,
+                       static_cast<uint8_t>(ReqType::kClientHeartbeat),
+                       &tag->req_mbuf, &tag->resp_mbuf, ping_cont_func,
+                       tag);
+}
+
+
 /***
  * tid: this clients thread id
  * nexus: pointer to machine's nexus
@@ -407,7 +751,7 @@ get_client_id(size_t thread_id) {
  ***/
 void
 client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
-                   uint16_t proxy_id_start)//, size_t raft_node_id)
+                   uint16_t proxy_id_start)
 {
   ClientContext c;
   c.app_stats = app_stats;
@@ -420,13 +764,24 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
 
   c.client_id = get_client_id(tid);
 
+  // creates 128 random A-Z paths of length 16 (including /)
+  for (size_t i = 0; i < 128; i++) {
+    std::string path;
+    path.push_back('/');
+    for (size_t j = 0; j < 7; j++) {
+      path.push_back(random() % 26 + 'A' + random() % 2 * 32);
+    }
+    path.push_back('/');
+    for (size_t j = 0; j < 7; j++) {
+      path.push_back(random() % 26 + 'A' + random() % 2 * 32);
+    }
+    c.path_names.push_back(path);
+  }
+
   LOG_INFO("Thread %zu client_id is %u\n", c.thread_id, c.client_id);
 
   LOG_INFO(
-      "Thread ID: %zu proxy_id start %d "
-      "tid %zu "
-      "nproxy_threads %zu "
-      "c.proxy_id %d\n",
+      "Thread ID: %zu proxy_id start %d tid %zu nproxy_threads %zu c.proxy_id %d\n",
       tid, proxy_id_start, tid, FLAGS_nproxy_threads, c.proxy_id);
   LOG_INFO("Thread ID: %zu starting with %zu sequence spaces\n",
            c.thread_id, nsequence_spaces);
@@ -438,8 +793,11 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
     erpc::rt_assert(c.fp != NULL, "Couldn't open fd for seqnums!");
   } else if (PLOT_RECOVERY || CHECK_FIFO) {
     char fname[100];
-    snprintf(fname, 100, "seqnums-%s-%zu.receivedSequenceNumbers",
-             FLAGS_my_ip.c_str(), tid);
+    snprintf(fname,
+             100,
+             "seqnums-%s-%zu.receivedSequenceNumbers",
+             FLAGS_my_ip.c_str(),
+             tid);
     c.fp = fopen(fname, "w+");
     erpc::rt_assert(c.fp != NULL, "Couldn't open fd for recovery!");
   }
@@ -474,66 +832,49 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
     send_request(&c, c.ops[i], true);
   }
 
+  // The main loop!
   LOG_INFO("Starting main loop in thread %zu...\n", tid);
-
+  clock_gettime(CLOCK_REALTIME, &c.tput_t0);
   // Add some time for warmup/cooldown
-  Timer timer;
-  timer.init(kWarmup*SEC_TIMER_US, nullptr, nullptr);
-  c.state = State::warmup;
-  timer.start();
+  size_t total_runtime = FLAGS_expduration + kWarmup * 2;
+  for (size_t i = 0; (i < total_runtime) && !force_quit; i += 1) {
+    LOG_INFO("Thread ID: %zu on iteration %zu\n", c.thread_id, i);
+    if (i == kWarmup) {
+      c.print_stats();
+    } else if (i == (kWarmup + FLAGS_expduration)) {
+      c.print_stats();
+    }
 
-  Timer ps_timer; ps_timer.init(SEC_TIMER_US, nullptr, nullptr);
-
-  while (true) {
-    // change state if necessary
-    if (timer.expired_reset()) {
-      if (c.state == State::warmup) {
-        LOG_INFO("Thread %zu done warmup starting main experiment\n",
-                 c.thread_id);
-        // change state to main body
-        c.state = State::experiment;
-        ps_timer.start();
-        timer.change_period(FLAGS_expduration * SEC_TIMER_US);
-        timer.start();
-        // stats start time
-        clock_gettime(CLOCK_REALTIME, &c.tput_t0);
-      } else if (c.state == State::experiment) {
-        LOG_INFO("Thread %zu done main experiment starting cooldown\n",
-                 c.thread_id);
-        // change state to cooldown
-        c.state = State::cooldown;
-        timer.change_period(kWarmup * SEC_TIMER_US);
-        timer.start();
-      } else {
-        break;
+    // wait until after warmup to detect death...
+    if (i > kWarmup) {
+      LOG_INFO("Thread ID: %zu setting received responses to false...\n", tid);
+      for (size_t k = 0; k < FLAGS_concurrency; k++) {
+        c.ops[k]->received_response = false;
       }
     }
 
-    if (c.state == State::experiment) {
-      if (ps_timer.expired_reset()) {
-        c.print_stats();
-        // wait until after warmup to detect death...
-        LOG_INFO("Thread ID: %zu setting received responses to false...\n", tid);
-        for (size_t k = 0; k < FLAGS_concurrency; k++) {
-          c.ops[k]->received_response = false;
-        }
-        // sync to disk ~once per second, prevent clients pausing for a long time
-        // to sync to disk.
-        if (PLOT_RECOVERY) {
-          fsync(fileno(c.fp));
-        }
-      }
+    c.ping_connections();
+
+    // sync to disk ~once per second, prevent clients pausing for a long time
+    // to sync to disk.
+    if (PLOT_RECOVERY) {
+      fsync(fileno(c.fp));
     }
 
-    run_event_loop_us(c.rpc, 1000);
+    rpc.run_event_loop(1000);
 
-    if (c.state == State::experiment) {
+    LOG_INFO("Thread ID: %zu checking if received...\n", tid);
+
+    // if this op didn't receive a response in the last second
+    // the proxy is probably dead... we want a higher granularity
+    if ((i > kWarmup && i < total_runtime - kWarmup)) {
       size_t k = 0;
       double now = erpc::to_sec(erpc::rdtsc(), c.rpc->get_freq_ghz());
       for (k = 0; k < FLAGS_concurrency; k++) {
         if (!c.ops[k]->received_response &&
             (now - erpc::to_sec(c.last_retx[k], c.rpc->get_freq_ghz())) >
-            failover_to) {
+                failover_to) {
+          // commented out during experimentation...
           if (k == 0) {
             LOG_INFO("Thread ID: %zu DECLARING PROXY %zu DEAD! "
                      "op %zu did not receive a response in the "
@@ -551,7 +892,7 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
       }
     } else {
       // in warmup/cooldown
-      // LOG_INFO("Thread ID: %zu in warmup or cooldown\n", c.thread_id);
+      LOG_INFO("Thread ID: %zu in warmup or cooldown\n", c.thread_id);
     }
   }
 
@@ -564,8 +905,17 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
   if (tid == 0) {
     LOG_INFO("Thread 0: Cleaning up...\n");
 
+    char hostname[256];
+    int result;
+    result = gethostname(hostname, 256);
+    erpc::rt_assert(!result, "Couldn't resolve hostname");
+    std::string hname(hostname, hostname + strlen(hostname));
+
     char fname[100];
-    sprintf(fname, "%s/%s", FLAGS_out_dir.c_str(), FLAGS_results_file.c_str());
+    std::vector<std::string> strs;
+    boost::split(strs, hname, boost::is_any_of("."));
+
+    sprintf(fname, "%s/%s.dat", FLAGS_out_dir.c_str(), strs[0].c_str());
 
     FILE *fp;
     fp = fopen(fname, "w+");
@@ -586,7 +936,6 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
   LOG_INFO("Exiting thread %zu\n", tid);
 }
 
-
 // Launch proxy worker threads with configured numbers of leaders/followers
 void
 client_launch_threads(size_t nthreads, erpc::Nexus *nexus) {
@@ -594,7 +943,8 @@ client_launch_threads(size_t nthreads, erpc::Nexus *nexus) {
   auto *app_stats = new app_stats_t[nthreads];
   std::vector<std::thread> threads(nthreads);
 
-  // each client thread needs the ips of 3 proxy machine
+  // each client thread needs the ips of 3 proxy machines
+
   for (size_t i = 0; i < nthreads; i++) {
     LOG_INFO("Setting up thread %zu...\n", i);
 
@@ -608,14 +958,12 @@ client_launch_threads(size_t nthreads, erpc::Nexus *nexus) {
                        nthreads > 8 ? i / 2 : i);
   }
 
-  // for (auto &thread : threads) thread.join();
   for (size_t i = 0; i < nthreads; i++) {
     threads[i].join();
     LOG_INFO("Joined thread %zu\n", i);
   }
   delete[] app_stats;
 }
-
 
 static void
 signal_handler(int signum) {
@@ -671,6 +1019,27 @@ main(int argc, char **argv) {
 
   nsequence_spaces = FLAGS_nsequence_spaces;
 
+  // Op percentages
+  create_percent = FLAGS_create_percent;
+  rename_percent = FLAGS_rename_percent;
+  write_percent = FLAGS_write_percent;
+  read_percent = FLAGS_read_percent;
+  delete_percent = FLAGS_delete_percent;
+  exists_percent = FLAGS_exists_percent;
+  get_children_percent = FLAGS_get_children_percent;
+
+  nzk_shards = FLAGS_nzk_servers/kZKReplicationFactor;
+  LOG_INFO("cp %f renp %f wp %f reap %f dp %f ep %f gcp %f \n",
+           create_percent, rename_percent, write_percent, read_percent,
+           delete_percent, exists_percent, get_children_percent);
+  LOG_INFO("Client connection timeout is %zu\n", kClientConnectionTimeout);
+
+  double sum = create_percent + rename_percent + write_percent + read_percent
+      + delete_percent + exists_percent + get_children_percent;
+  // == doesn't work
+  fmt_rt_assert(std::abs(sum - 1.0) < .0000000001,
+                "Op percents don't add to 1 got %f\n", sum);
+
   erpc::rt_assert(FLAGS_nsequence_spaces > 0,
                   "Can not have 0 sequence spaces\n");
   erpc::rt_assert(FLAGS_concurrency <= MAX_CONCURRENCY,
@@ -679,8 +1048,18 @@ main(int argc, char **argv) {
                   "Must specify nproxy_leaders");
   erpc::rt_assert(FLAGS_nproxy_threads > 0,
                   "Must specify nproxy_threads");
+  erpc::rt_assert(FLAGS_rename_percent >= 0 &&
+                      FLAGS_rename_percent <= 1,
+                  "rename percent must be between 0 and 1");
 
   my_ip = FLAGS_my_ip;
+
+  // Make sure we have enough ring buffers; shouldn't really be a
+  // problem for the clients
+//    size_t num_sessions = FLAGS_nthreads;
+//    erpc::rt_assert(num_sessions * erpc::kSessionCredits <=
+//           erpc::Transport::kNumRxRingEntries,
+//          "Too few ring buffers");
 
   LOG_INFO("Passed check for Too few ring buffers.\n");
 
@@ -691,6 +1070,14 @@ main(int argc, char **argv) {
   nexus.register_req_func(
       static_cast<uint8_t>(ReqType::kRecordNoopSeqnum),
       noop_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kWatchNotification),
+      watch_notification_handler);
+
+  // Connections are per nexus (machine).
+  LOG_INFO("kNumRxRingEntries %zu kSessionCredits %zu max connections %zu\n",
+           erpc::Transport::kNumRxRingEntries, erpc::kSessionCredits,
+           erpc::Transport::kNumRxRingEntries/erpc::kSessionCredits);
 
   LOG_INFO("Launching threads...\n");
   client_launch_threads(FLAGS_nthreads, &nexus);

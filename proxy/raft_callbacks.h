@@ -12,7 +12,6 @@ extern "C" {
 #define FALLING_BEHIND_WARNING 200000
 #define MAX_AE_SIZE 20000
 #define N_ENTRIES_FAST_PATH 50
-
 // for debugging, mimics an internal willemt/Raft struct...
 // https://github.com/willemt/raft
 typedef struct {
@@ -171,10 +170,9 @@ struct app_appendentries_t {
     for (size_t i = 0; i < static_cast<size_t>(msg_ae->n_entries); i++) {
       // Copy the entry header
       *reinterpret_cast<msg_entry_t *>(buf) = msg_ae->entries[i];
-      reinterpret_cast<msg_entry_t *>(buf)->data.buf = nullptr;  // Local ptr
+      reinterpret_cast<msg_entry_t *>(buf)->data.buf = nullptr;
       buf += sizeof(msg_entry_t);
 
-      // Copy the entry data
       rte_memcpy(buf, msg_ae->entries[i].data.buf,
                  msg_ae->entries[i].data.len);
       buf += msg_ae->entries[i].data.len;
@@ -214,6 +212,7 @@ struct app_appendentries_t {
         assert(msg_ae.entries[i].data.buf == nullptr);
 
         msg_ae.entries[i].data.buf = malloc(msg_ae.entries[i].data.len);
+
         rte_memcpy(msg_ae.entries[i].data.buf, buf, msg_ae.entries[i].data.len);
         buf += msg_ae.entries[i].data.len;
 
@@ -239,7 +238,7 @@ static std::string msg_requestvote_string(msg_requestvote_t *msg_rv) {
   return ret.str();
 }
 
-// Return a string representation of a requestvote response request message
+// Return a string representation of a requestvote request message
 static std::string msg_requestvote_response_string(
     msg_requestvote_response_t *msg_rv_resp) {
   std::ostringstream ret;
@@ -275,6 +274,10 @@ inline int __send_requestvote(
 
   LOG_RAFT("in __send_requestvote\n");
 
+  // Now we are allowing failover!
+  LOG_RAFT_SMALL("trying to become the leader\n");
+  LOG_INFO("trying to become the leader\n");
+
   // receiver data
   auto *data = static_cast<replica_data_t *>(raft_node_get_udata(node));
 
@@ -304,9 +307,9 @@ inline int __send_requestvote(
   rv_req->proxy_id = my_data->pid;
 
   LOG_ERROR("PID: %u sending requestvote to session number: %d \n\t%s\n",
-         proxy->proxy_id,
-         proxy->c->session_num_vec[static_cast<int>(data->idx)],
-         msg_requestvote_string(&rv_req->msg_rv).c_str());
+            proxy->proxy_id,
+            proxy->c->session_num_vec[static_cast<int>(data->idx)],
+            msg_requestvote_string(&rv_req->msg_rv).c_str());
   fflush(stdout);
 
   // enqueue it to be sent
@@ -340,7 +343,7 @@ inline void requestvote_handler(erpc::ReqHandle *req_handle, void *_context) {
   int was_leader = raft_is_leader(proxy->raft);
 
   LOG_ERROR("PID: %d received requestvote from %u, am I leader? %d\n",
-           proxy->proxy_id, rv_req->node_id, was_leader);
+            proxy->proxy_id, rv_req->node_id, was_leader);
 
   int e = raft_recv_requestvote(proxy->raft,
                                 raft_get_node(proxy->raft, rv_req->node_id),
@@ -349,8 +352,8 @@ inline void requestvote_handler(erpc::ReqHandle *req_handle, void *_context) {
   erpc::rt_assert(e == 0, "error receiving requestvote %s\n", strerror(e));
 
   LOG_ERROR("PID: %d sending requestvote response %s\n",
-                 proxy->proxy_id,
-                 msg_requestvote_response_string(rv_resp).c_str());
+            proxy->proxy_id,
+            msg_requestvote_response_string(rv_resp).c_str());
 
   wc->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
 
@@ -376,8 +379,8 @@ inline void requestvote_cont(void *, void *_tag) {
   if (likely(rv_tag->resp_msgbuf.get_data_size() > 0)) {
     // The RPC was successful
     LOG_ERROR("PID: %u Received requestvote response: %s\n",
-           proxy->proxy_id,
-           msg_requestvote_response_string(msg_rv_resp).c_str());
+              proxy->proxy_id,
+              msg_requestvote_response_string(msg_rv_resp).c_str());
 
     int e = raft_recv_requestvote_response(proxy->raft, rv_tag->node,
                                            msg_rv_resp);
@@ -400,7 +403,7 @@ inline void requestvote_cont(void *, void *_tag) {
   if (!was_leader) {// if I am becoming the leader
     if (raft_is_leader(proxy->raft)) {
       LOG_ERROR("[%zu] I JUST GAINED LEADERSHIP for %d\n",
-             proxy->c->thread_id, proxy->proxy_id);
+                proxy->c->thread_id, proxy->proxy_id);
       proxy->gain_leadership();
     }
   } else if (!raft_is_leader(proxy->raft)) {
@@ -442,10 +445,8 @@ inline int __send_appendentries(
   auto *data = static_cast<replica_data_t *>(raft_node_get_udata(node));
 
   bool is_keepalive = (msg->n_entries == 0);
-  // there has to be a better way to avoid "unused" when logging is off
   (void) is_keepalive;
 
-  // might be nice to track this
   if (data->nOutstanding >= MAX_OUTSTANDING_AE) {
     LOG_WARN("[%zu] Too many outstanding append_entries (%d), not sending to"
              " node_id %d\n", wc->thread_id, data->nOutstanding, data->node_id);
@@ -459,12 +460,11 @@ inline int __send_appendentries(
       data->node_id, data->pid, msg->n_entries,
       erpc::get_formatted_time().c_str());
 
-  // If haven't received in a while and not connected don't send
   if (!wc->rpc->is_connected(
       wc->session_num_vec[static_cast<int>(data->idx)])) {
     LOG_RECOVERY("[%zu] __send_appendentries not connected to proxy sn %d\n",
-                  wc->thread_id,
-                  wc->session_num_vec[static_cast<int>(data->idx)]);
+                 wc->thread_id,
+                 wc->session_num_vec[static_cast<int>(data->idx)]);
     return 0;
   }
 
@@ -475,8 +475,8 @@ inline int __send_appendentries(
     // here we only want up to the i-1 entry
     // if the next entry makes this request too large, stop adding entries
     // was > proxy->c->rpc->get_max_msg_size() 2208 2.39M, 2207 49k
-    if (req_size + sizeof(msg_entry_t) + msg->entries[i].data.len >
-        MAX_AE_SIZE) {
+    if (req_size + sizeof(msg_entry_t) + msg->entries[i].data.len
+        > MAX_AE_SIZE) {
       if (i != 0) {
         msg->n_entries = i;
         break;
@@ -485,21 +485,33 @@ inline int __send_appendentries(
     req_size += sizeof(msg_entry_t) + msg->entries[i].data.len;
   }
 
-  auto *log = reinterpret_cast<my_log_private_t *>(
-          (reinterpret_cast<raft_server_private_t *>(proxy->raft))->log);
+  auto *log =
+      reinterpret_cast<my_log_private_t *>((reinterpret_cast<raft_server_private_t *>(proxy->raft))->log);
   LOG_RAFT_SMALL("\t to node_id %d size of log %ld\n",
-                 data->node_id, log->count);
-  LOG_RAFT_SMALL("\t to node_id %d prev_log_idx %ld "
-                 "n_entries %d appendentries size: %lu\n",
-                 data->node_id, msg->prev_log_idx, msg->n_entries, req_size);
+                 data->node_id,
+                 reinterpret_cast<my_log_private_t *>((reinterpret_cast<raft_server_private_t *>(proxy->raft))->log)->count);
+  LOG_RAFT_SMALL(
+      "\t to node_id %d prev_log_idx %ld n_entries %d appendentries size: %lu\n",
+      data->node_id,
+      msg->prev_log_idx,
+      msg->n_entries,
+      req_size);
 
   if (unlikely(log->count - msg->prev_log_idx > FALLING_BEHIND_WARNING)) {
     LOG_WARN(
         "[%s] Thread %zu WARNING: REPLICA %d FELL OVER %d BEHIND! %ld BEHIND\n",
-        erpc::get_formatted_time().c_str(), proxy->c->thread_id, data->node_id,
-        FALLING_BEHIND_WARNING, log->count - msg->prev_log_idx);
+        erpc::get_formatted_time().c_str(),
+        proxy->c->thread_id,
+        data->node_id,
+        FALLING_BEHIND_WARNING,
+        log->count - msg->prev_log_idx);
   }
 
+  if (unlikely(req_size > proxy->c->rpc->get_max_msg_size())) {
+    printf("appendentries too large size %lu max size is %lu n_entries %d\n",
+           req_size, proxy->c->rpc->get_max_msg_size(), msg->n_entries);
+    fflush(stdout);
+  }
 
   raft_tag_t *rrt = proxy->raft_tag_pool.alloc();
   rrt->req_msgbuf = proxy->c->rpc->alloc_msg_buffer_or_die(req_size);
@@ -521,6 +533,7 @@ inline int __send_appendentries(
 
   proxy->c->ae_pkts += req_size / (1025);
   proxy->c->ae_bytes += req_size;
+
   data->nOutstanding++;
 
 #if PRINT_TIMING
@@ -584,9 +597,8 @@ inline void appendentries_handler(erpc::ReqHandle *req_handle, void *_context) {
   // send the blank response immediately
   erpc::MsgBuffer &resp_msgbuf = req_handle->pre_resp_msgbuf;
   proxy->c->rpc->resize_msg_buffer(&resp_msgbuf, 8);
-  debug_print(DEBUG_RAFT, "responding to appendentries\n");
+  LOG_RAFT("responding to appendentries\n");
   proxy->c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
-
 
   LOG_RAFT_SMALL(
       "smr: received appendentries from node_id %d for proxy_id %d "
@@ -629,13 +641,9 @@ inline void appendentries_handler(erpc::ReqHandle *req_handle, void *_context) {
 
   if (msg_ae.entries != static_msg_entry_arr) delete[] msg_ae.entries;
 
-  // if we have not yet connected to this proxy (which is possible) the session num will be 0!
-  // this will then send it to the sequencer!
-  // I think it safe to just return and never send the "response" rpc
   auto session_num =
       proxy->c->session_num_vec[static_cast<int>(proxy->replica_data[node_id].idx)];
   if (unlikely(session_num == 0)) {
-    // we haven't connected to the proxy in this direction yet, for now we just drop
     return;
   }
   erpc::rt_assert(session_num != 0, "would have sent to session num 0!\n");
@@ -645,6 +653,7 @@ inline void appendentries_handler(erpc::ReqHandle *req_handle, void *_context) {
                                  &rrt->req_msgbuf, &rrt->resp_msgbuf,
                                  appendentries_response_cont,
                                  reinterpret_cast<void *>(rrt));
+
 #if PRINT_TIMING
   printf("[%s] ae_handler [%s]\n", start.c_str(), erpc::get_formatted_time().c_str());
 #endif
@@ -687,11 +696,6 @@ appendentries_response_handler(erpc::ReqHandle *req_handle, void *_context) {
   erpc::MsgBuffer &resp_msgbuf = req_handle->pre_resp_msgbuf;
   proxy->c->rpc->resize_msg_buffer(&resp_msgbuf, 8);
 
-  LOG_RAFT_SMALL(
-      "proxy_id %u appendentries_response_handler about to queue response started [%s] now [%s]\n",
-      proxy->proxy_id,
-      start_time.c_str(),
-      erpc::get_formatted_time().c_str());
   proxy->c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
 
   if (likely(req_handle->get_req_msgbuf()->get_data_size() > 0)) {
@@ -732,8 +736,6 @@ appendentries_response_handler(erpc::ReqHandle *req_handle, void *_context) {
     printf("appendentries failed\n");
   }
 
-  // TODO perf: calling periodic here may improve latency by applying entries that were just committed?
-
   proxy->replica_data[node_id].nOutstanding--;
 
 #if PRINT_TIMING
@@ -750,6 +752,10 @@ inline void appendentries_cont(void *, void *_tag) {
   Proxy *proxy =
       ae_tag->proxy;
 
+  LOG_RAFT_SMALL(
+      "smr: proxy_id %u received an appendentries ack from some node\n",
+      proxy->proxy_id);
+
   proxy->c->rpc->free_msg_buffer(ae_tag->req_msgbuf);
   proxy->c->rpc->free_msg_buffer(ae_tag->resp_msgbuf);
   proxy->raft_tag_pool.free(ae_tag);
@@ -763,8 +769,8 @@ inline void appendentries_cont(void *, void *_tag) {
 
 void fix_client_pointers(Proxy *proxy,
                          std::unordered_map<uint16_t,
-                         std::unordered_map<client_reqid_t,
-                         ClientOp *> > *m) {
+                                            std::unordered_map<client_reqid_t,
+                                                               ClientOp *> > *m) {
   for (auto p0 : *m) {
     for (auto p1 : p0.second) {
       ClientOp *client_op = p1.second;
@@ -826,8 +832,6 @@ process_snapshot(WorkerContext *wc, snapshot_request_t *sr, Proxy *proxy) {
         std::to_string(proxy->proxy_id);
   }
 
-  // this just writes the same bitmap over and over again
-  // write the files
   char *buf = sr->snapshot + sr->size_before_bm;
   for (size_t i = 0; i < nsequence_spaces; i++) {
     bm_files[i] = fopen(bm_fnames[i].c_str(), "w");
@@ -837,6 +841,7 @@ process_snapshot(WorkerContext *wc, snapshot_request_t *sr, Proxy *proxy) {
                       == b_size,
                   "did not write all data?\n");
     buf += b_size;
+
     fclose(bm_files[i]);
   }
 
@@ -870,6 +875,9 @@ process_snapshot(WorkerContext *wc, snapshot_request_t *sr, Proxy *proxy) {
 
   auto *raft = proxy->raft;
 
+  // ZooKeeper
+  auto wnq = proxy->watch_notification_queue;
+
   // load new proxy
   {
     std::ifstream ifs(filename);
@@ -892,6 +900,9 @@ process_snapshot(WorkerContext *wc, snapshot_request_t *sr, Proxy *proxy) {
   proxy->cycles_per_msec = cpm;
   proxy->tag_pool = tag_pool;
   proxy->raft = raft;
+
+  // ZooKeeper
+  proxy->watch_notification_queue = wnq;
 
   // set the bitmaps
   for (size_t i = 0; i < nsequence_spaces; i++) {
@@ -997,7 +1008,7 @@ inline void send_snapshot_handler(erpc::ReqHandle *req_handle, void *_context) {
     sr->last_included_idx = ss_req->last_included_idx;
     sr->last_included_term = ss_req->last_included_term;
     sr->msgs =
-        ss_req->total_msg_size + 1;
+        ss_req->total_msg_size + 1; // total_msg_size is the last index...
     sr->size_before_bm = ss_req->size_before_bm;
     sr->size = ss_req->total_snapshot_size;
     sr->snapshot = static_cast<char *>(malloc(
@@ -1106,10 +1117,7 @@ inline int __send_snapshot(
   std::string ss_file_name =
       "/usr/local/snapshot" + wc->my_ip + std::to_string(wc->thread_id) +
           std::to_string(proxy->proxy_id);
-  // write the snapshot file to memory
-  // this is how to read to memory
-  // open the files and get the sizes
-  // main snapshot file and size
+
   FILE *ss_file = fopen(ss_file_name.c_str(), "rb");
   fseek(ss_file, 0, SEEK_END);
   auto ss_size = static_cast<size_t>(ftell(ss_file));
@@ -1196,7 +1204,7 @@ inline int __send_snapshot(
     ss_req->msg_n = msg_n++;
     ss_req->length = length;
     ss_req->offset = static_cast<size_t>(curr -
-        snapshot); // curr grows from snapshot // apparently char * is a long int
+        snapshot);
     rte_memcpy(&ss_req->snapshot_block, curr, length);
     curr += length;
     size_left -= length;
@@ -1296,7 +1304,6 @@ inline int __applylog(
 
       Batch *batch = proxy->appended_batch_map[our_entry->batch_id];
 
-      // these maintenance things should be more clear...
       proxy->delete_done_batches(our_entry->highest_cons_batch_id);
       if (proxy->highest_cons_batch_id < our_entry->highest_cons_batch_id) {
         proxy->highest_cons_batch_id = our_entry->highest_cons_batch_id;
@@ -1324,8 +1331,6 @@ inline int __applylog(
                     our_entry->batch_id,
                     batch->batch_id);
 
-      debug_print(DEBUG_RAFT, "[%zu] Recording seqnums\n", proxy->c->thread_id);
-      // update FIFO stuff
       for (auto op : batch->batch_client_ops) {
         LOG_FIFO("highest_sequenced_crid %ld, client_reqid %zu\n",
                  proxy->highest_sequenced_crid[op->client_id],
@@ -1335,31 +1340,9 @@ inline int __applylog(
             op->client_reqid);
       }
 
-      batch->record_ms_seqnums();
+      batch->submit_batch_to_system();
 
-      // this needs to be done after updating or we could try to enter a smaller
-      // number into the bitmap than the base
-      for (size_t i = 0; i < nsequence_spaces; i++) {
-
-        wc->received_ms_seqnums[i]->mutex.lock();
-        if (our_entry->base_seqnums[i] >
-            wc->received_ms_seqnums[i]->base_seqnum) {
-          LOG_GC("[%zu] Setting pending_truncates = 1 in applylog\n",
-                 proxy->c->thread_id);
-          wc->received_ms_seqnums[i]->pending_truncates = 1;
-        }
-        wc->received_ms_seqnums[i]->mutex.unlock();
-      }
-
-      if (raft_is_leader(proxy->raft)) {
-        debug_print(DEBUG_RAFT,
-                    "[%zu] I am the leader submitting to system batch with seq num: %lu\n",
-                    proxy->c->thread_id,
-                    batch->seqnum);
-        batch->submit_batch_to_system();
-      }
-      debug_print(DEBUG_RAFT, "[%zu] done with applylog\n",
-                  proxy->c->thread_id);
+      LOG_RAFT("[%zu] done with applylog\n", proxy->c->thread_id);
     }
       break;
 
@@ -1426,6 +1409,7 @@ inline int __log_offer(
   (void) entry_idx;
 
   auto *tmp_entry = reinterpret_cast<entry_t *>(entry->data.buf);
+
   auto *my_data = static_cast<replica_data_t *>(user_data);
   auto *wc = my_data->wc;
   Proxy *proxy = wc->proxies[my_data->pid];
@@ -1435,13 +1419,14 @@ inline int __log_offer(
 
   switch (tmp_entry->type) {
     case EntryType::kDummy:
+      // do nothing
       break;
 
     case EntryType::kSequenceNumberNoncontig: {
       auto *our_entry = deserialize_entry(entry->data.buf);
 
       if (!raft_is_leader(proxy->raft)) {
-        debug_print(DEBUG_RAFT, "In log_offer for kSequenceNumber\n");
+        debug_print(DEBUG_RAFT, "In __log_offer for kSequenceNumber\n");
 
         // should be the only place a batch is created on a follower
         Batch *batch = proxy->create_new_follower_batch(our_entry);
@@ -1451,17 +1436,20 @@ inline int __log_offer(
         for (int i = 0; i < our_entry->batch_size; i++) {
           ClientOp *op = proxy->client_op_pool.alloc();
 
-          op->populate(cmdata[i].reqtype,
-                       cmdata[i].client_id,
-                       cmdata[i].client_reqid,
-                       proxy->proxy_id, nullptr, 0, proxy, cmdata[i].seq_reqs);
+          op->populate(cmdata[i].reqtype, cmdata[i].client_id,
+                       cmdata[i].client_reqid, proxy->proxy_id, nullptr, 0,
+                       proxy, wc, cmdata[i].zk_payload);
 
           copy_seq_reqs(op->seq_reqs, cmdata[i].seq_reqs);
+          LOG_RAFT("[%zu] in __log_offer copied seq_reqs from log"
+                   " entry\n", proxy->c->thread_id);
+
           proxy->add_op_to_batch(op, batch);
           proxy->client_retx_in_progress_map[op->client_id][op->client_reqid] =
               op;
         }
-        debug_print(DEBUG_RAFT, "Creating new follower batch with srid %zu\n",
+        debug_print(DEBUG_RAFT,
+                    "Creating new follower batch with srid %zu\n",
                     batch->seq_req_id);
         proxy->appended_batch_map[our_entry->batch_id] = batch;
         debug_print(DEBUG_RAFT, "I AM NOT THE LEADER the leader is %d\n",
@@ -1485,8 +1473,6 @@ inline int __log_offer(
       erpc::exit_assert(our_entry->batch_size == batch->batch_size(),
                         "log offer batch sizes aren't the same!?\n");
 
-      // we received the sequence number, but it is not yet committed, so it is not safe to
-      // send this batch to the system/return to client
       batch->has_seqnum = true;
     }
       break;
@@ -1546,7 +1532,9 @@ int __log_pop(
 
   erpc::exit_assert(!raft_is_leader(proxy->raft),
                     "I am leader popping an entry!?\n");
+
   free(entry_to_pop);
+
   return 0;
 }
 
@@ -1580,8 +1568,6 @@ int __log_poll(
 
   auto *entry_to_poll = reinterpret_cast<entry_t *>(entry->data.buf);
   free(entry_to_poll);
-
-  // this gets called a lot by raft_end_snapshot
   return 0;
 }
 

@@ -15,7 +15,6 @@ class Bitmap {
   uint64_t sequence_space;
   char f_name[255];
 
-  // necessary and complicates serialization
   uint8_t pending_truncates;
 
   uint64_t *counts;
@@ -30,7 +29,7 @@ class Bitmap {
   }
 
   // boost ::serialize requires a default constructor, so this needs
-  // to be done separately from the contructor
+  // to be done separately from the constructor
   void assign_sequence_space_and_f_name(uint64_t _sequence_space) {
     sequence_space = _sequence_space;
     int r = rand();
@@ -166,7 +165,7 @@ class Bitmap {
                base_seqnum + SEQNUMS_PER_BLOCK * nblocks - 1);
   }
 
-  void write_to_file() { //const char *file_name) {
+  void write_to_file() {
     FILE *file = fopen(f_name, "w");
     erpc::rt_assert(file != NULL, "Could not open file for bitmap\n");
     size_t n = 0;
@@ -177,12 +176,10 @@ class Bitmap {
     fclose(file);
   }
 
-  // does this need to free bitmap!?
-  // assumes metadata is already set up
-  void read_from_file(const char *file_name) {//, size_t size) {
+  void read_from_file(const char *file_name) {
     size_t size = nblocks * BYTES_PER_BLOCK;
     erpc::rt_assert(
-        nblocks * BYTES_PER_BLOCK == size, // todo don't need this anymore
+        nblocks * BYTES_PER_BLOCK == size,
         "read_from_file size arg is wrong\n");
     FILE *file = fopen(file_name, "rb");
     bitmap = reinterpret_cast<uint8_t *>(malloc(size));

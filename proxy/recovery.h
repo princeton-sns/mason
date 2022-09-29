@@ -47,7 +47,7 @@ initiate_recovery_cont_func(void *_c, void *_tag) {
 
 // The sequencer has missed enough heartbeats.
 // Connect to the backup sequencer and tell it that the original
-// sequencer has died :-(
+// sequencer has died
 void
 initiate_recovery(void *_c) {
   WorkerContext *c = reinterpret_cast<WorkerContext *>(_c);
@@ -72,9 +72,6 @@ initiate_recovery(void *_c) {
 
   c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)] = -1;
 
-  // Pick a proxy and create a batch to associate tags to;
-  // the tags were made to be too specific
-  // The payload will be ignored, don't bother to update
   Proxy *proxy = c->proxies[FLAGS_proxy_id_start + c->thread_id];
   Batch *batch = proxy->batch_pool.alloc();
   batch->reset(c, proxy, 0, 0);
@@ -89,6 +86,7 @@ initiate_recovery(void *_c) {
   Tag *tag = proxy->tag_pool.alloc();
 
   tag->alloc_msgbufs(c, batch, false);
+  c->rpc->resize_msg_buffer(&tag->req_msgbuf, 1);
 
   debug_print(DEBUG_RECOVERY, "Getting ready to enqueue recovery request\n");
   uint8_t session_num = c->session_num_vec[static_cast<uint8_t>(
@@ -196,10 +194,6 @@ void send_bitmap(erpc::ReqHandle *req_handle, WorkerContext *c,
   Bitmap *agg = rc->agg;
 
   size_t block_offset = offset / BYTES_PER_BLOCK;
-
-  // Shouldn't have gotten this message if there are no packets left
-  // to send
-
   size_t nblocks_this_resp;
 
   // How big should the msgbuffer be?
@@ -251,9 +245,7 @@ collect_dependencies(WorkerContext *c, uint64_t sequence_space) {
       //    but not yet applied. Sealing the old sequencer and apply the
       //    recovery message should prevent the second case.
       for (auto const &x : proxy->appended_batch_map) {
-        // Populate dep struct with batch information
-        // Don't need all this for noopcats...?
-        Batch *batch = x.second;  // value
+        Batch *batch = x.second;
 
         dependency_t dep;
         dep.proxy_id = batch->proxy_id;
@@ -290,7 +282,7 @@ WorkerContext::respond_backup_ready() {
   uint8_t *leader_count = reinterpret_cast<uint8_t *>(msgbuf->buf);
   *leader_count = total_leaders;
   rpc->enqueue_response(backup_ready_handle, msgbuf);
-  backup_ready_handle = nullptr;  // make sure we don't do this again
+  backup_ready_handle = nullptr;
 }
 
 // All leaders on a thread will confirm recovery
@@ -331,7 +323,6 @@ replicate_recovery() {
   WorkerContext *c0 = context_vector->at(0);
   for (auto c : *context_vector) {
     c->in_recovery = true;
-
     for (auto &el : c->proxies) {
       Proxy *proxy = el.second;
       if (!raft_is_leader(proxy->raft)) {
@@ -386,7 +377,6 @@ request_bitmap_handler(erpc::ReqHandle *req_handle, void *_c) {
 
   debug_print(1, "in request_bitmap_handler\n");
 
-  // Need to find a leader/context to handle recovery batch
   Proxy *proxy = nullptr;
   WorkerContext *context = nullptr;
 
@@ -607,7 +597,6 @@ finish_recovery(WorkerContext *c) {
   debug_print(DEBUG_RECOVERY, "[%zu] Done with recovery event loop\n",
               c->thread_id);
 
-
   // Re-start client requests that were outstanding
   // Also reset all timers
   for (auto &el : c->proxies) {
@@ -624,7 +613,7 @@ finish_recovery(WorkerContext *c) {
 
     for (auto const &x : proxy->appended_batch_map) {
       // Populate dep struct with batch information
-      Batch *b = x.second;  // value
+      Batch *b = x.second;
       debug_print(DEBUG_RECOVERY, "Freeing recovery tag\n",
                   b->batch_id);
       proxy->tag_pool.free(b->recovery_tag);
