@@ -3,6 +3,18 @@
 
 size_t numa_node = 0;
 
+DEFINE_bool(am_backup, false,
+            "Set to true if this sequencer is a backup");
+DEFINE_string(my_ip, "",
+              "Sequencer IP address for eRPC setup");
+DEFINE_string(other_ips, "",
+              "IP addresses to connect to if this is the backup");
+DEFINE_string(out_dir, "",
+              "Output directory");
+DEFINE_uint64(nleaders, 0,
+              "Total number of proxy groups (needed for recovery)");
+
+volatile std::atomic_uint64_t sequence_number(0);
 volatile bool force_quit = false;
 
 std::vector<std::string> other_ip_list;
@@ -18,8 +30,7 @@ sm_handler(int session_num, erpc::SmEventType sm_event_type,
            erpc::SmErrType sm_err_type, void *_context) {
   auto *c = static_cast<ThreadContext *>(_context);
 
-  printf("Connected to session_num %d, thread_id %zu\n",
-        session_num, c->thread_id);
+  printf("session_num %d, thread_id %zu: ", session_num, c->thread_id);
 
   erpc::rt_assert(
       sm_err_type == erpc::SmErrType::kNoError,
@@ -47,7 +58,7 @@ sm_handler(int session_num, erpc::SmEventType sm_event_type,
       // Send message to each proxy, notifying them that the backup should
       // be used from now on.
       auto *rc = static_cast<RecoveryContext *>(_context);
-      auto i = static_cast<size_t>(std::abs(pid));
+      size_t i = static_cast<size_t>(std::abs(pid));
 
       notify_proxy_of_backup(rc, i);
     }
@@ -84,17 +95,8 @@ SeqContext::print_stats() {
     std::string totals = accum.to_string();
     fwrite(totals.c_str(), sizeof(char), strlen(totals.c_str()), fp);
     printf("TOTAL: %s\n\n", totals.c_str());
-
-    printf("about to print seqnums..... nsequence_spaces %zu\n",
-           sequence_spaces->nsequence_spaces);
-    std::string line;
-    for (size_t i = 0; i < sequence_spaces->nsequence_spaces; i++) {
-      line += std::to_string(sequence_spaces->sequence_spaces[i])
-          + " ";// + std::to_string(seqnums[i].seqnum);
-    }
-    line += "\n";
-    LOG_INFO("%s", line.c_str());
-
+    uint64_t tmp = sequence_number;
+    printf("Current seqnum: %lu\n", tmp);
     fflush(fp);
   }
 
@@ -110,40 +112,15 @@ seqnumreq_handler(erpc::ReqHandle *req_handle, void *_context) {
   // Get message buffer and check messagesize
   auto *c = static_cast<SeqContext *>(_context);
   const erpc::MsgBuffer *req_msgbuf = req_handle->get_req_msgbuf();
-  fmt_rt_assert(req_msgbuf->get_data_size() == sequencer_payload_size(
-      c->sequence_spaces->nsequence_spaces),
-                "request wrong size %zu != %zu\n", req_msgbuf->get_data_size(),
-                sequencer_payload_size(c->sequence_spaces->nsequence_spaces));
+  erpc::rt_assert(req_msgbuf->get_data_size() == sizeof(payload_t),
+    "sequencer request wrong size\n");
 
-  // Get the batch size and increment seqnums
-  // If sn = 0 (we haven't started) and batch_size 5:
-  // requester gets 0,1,2,3,4, next sn is 5, return 4 to requester.
-  auto *payload = reinterpret_cast<payload_t *>(req_msgbuf->buf);
+  payload_t *response = reinterpret_cast<payload_t *>(
+      req_handle->pre_resp_msgbuf.buf);
 
-  debug_print(DEBUG, "Thread %d: received request from %d\n",
-              payload->proxy_id, c->thread_id);
-
-  erpc::Rpc<erpc::CTransport>::resize_msg_buffer(&req_handle->pre_resp_msgbuf,
-                                                 sequencer_payload_size(
-                                                     c->sequence_spaces->nsequence_spaces));
-
-  auto *response =
-      reinterpret_cast<payload_t *>(req_handle->pre_resp_msgbuf.buf);
-  rte_memcpy(response,
-             payload,
-             req_msgbuf->get_data_size());
-
-  // resize maps if necessary
-  if (c->amo_map.size() <= payload->proxy_id) {
-    c->amo_map.resize(payload->proxy_id + 1);
-  }
-  if (c->amo_map[payload->proxy_id].size() <= payload->seq_req_id) {
-    c->amo_map[payload->proxy_id].resize(payload->seq_req_id + 1);
-  }
-
-  AmoMapElem *m = &c->amo_map[payload->proxy_id][payload->seq_req_id];
-
-  response->retx = m->assign_numbers(c, response->seq_reqs);
+  // the response is the sequence number before the add
+  // sequence_number holds next number to be handed out
+  response->seqnum = sequence_number.fetch_add(1);
 
   c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
   c->stat_resp_tx_tot++;
@@ -160,24 +137,19 @@ heartbeat_handler(erpc::ReqHandle *req_handle, void *_context) {
 }
 
 void
-seq_thread_func(size_t thread_id,
-                erpc::Nexus *nexus,
-                app_stats_t *app_stats,
-                SequenceSpaces *sequence_spaces) {
+seq_thread_func(size_t thread_id, erpc::Nexus *nexus, app_stats_t *app_stats) {
   SeqContext c;
   c.thread_id = thread_id;
   c.nconnections = 0;
   c.app_stats = app_stats;
-  c.sequence_spaces = sequence_spaces;
 
   erpc::Rpc<erpc::CTransport> rpc(nexus, static_cast<void *>(&c),
                                   static_cast<uint8_t>(thread_id),
                                   sm_handler, 0);
   c.rpc = &rpc;
-
-  // make sure the pre resp msgbuf is large enough
-  c.rpc->set_pre_resp_msgbuf_size(
-      sizeof(payload_t) + 2 * FLAGS_nsequence_spaces * 8);
+  // preset the response size to be payload_t
+  // limits size to payload_t, but Corfu sequencer never does anything else
+  c.rpc->set_pre_resp_msgbuf_size(sizeof(payload_t));
 
   clock_gettime(CLOCK_REALTIME, &c.tput_t0);
   printf("Thread %lu beginning main loop...\n", thread_id);
@@ -190,17 +162,13 @@ seq_thread_func(size_t thread_id,
 }
 
 void
-launch_threads(size_t nthreads,
-               erpc::Nexus *nexus,
-               app_stats_t *app_stats,
-               std::vector<std::thread> *threads,
-               SequenceSpaces *sequence_spaces) {
+launch_threads(size_t nthreads, erpc::Nexus *nexus,
+               app_stats_t *app_stats, std::vector<std::thread> *threads) {
   // Spin up the requisite number of sequencer threads
   for (size_t i = 0; i < nthreads; i++) {
     printf("Launching thread %zu\n", i);
     fflush(stdout);
-    (*threads)[i] =
-        std::thread(seq_thread_func, i, nexus, app_stats, sequence_spaces);
+    (*threads)[i] = std::thread(seq_thread_func, i, nexus, app_stats);
     erpc::bind_to_core((*threads)[i], numa_node, i);
   }
 
@@ -256,7 +224,6 @@ main(int argc, char **argv) {
   printf("Other ips: %s\n", FLAGS_other_ips.c_str());
 
   // Count on a session per proxy; connections will only ever be one-way
-  // (i.e., sequencer will only ever be "client" or "server"
   size_t nproxies = other_ip_list.size();
   const size_t num_sessions = nproxies * N_SEQTHREADS;
   erpc::rt_assert(num_sessions * erpc::kSessionCredits <=
@@ -295,18 +262,13 @@ main(int argc, char **argv) {
   std::vector<std::thread> threads(nthreads);
   auto *app_stats = new app_stats_t[nthreads];
 
-  LOG_INFO("Initializing with %zu sequence spaces\n", FLAGS_nsequence_spaces);
-  auto *sequence_spaces = new SequenceSpaces(FLAGS_nsequence_spaces);
-  erpc::rt_assert(sequence_spaces->nsequence_spaces == FLAGS_nsequence_spaces,
-                  "not right sequence spaces after construction\n");
-
-  launch_threads(nthreads, &nexus, app_stats, &threads, sequence_spaces);
+  launch_threads(nthreads, &nexus, app_stats, &threads);
 
   // If I'm the backup, start with waiting for recovery requests
   if (FLAGS_am_backup) {
-    run_recovery_loop(&nexus, FLAGS_nleaders, sequence_spaces);
+    run_recovery_loop(&nexus, FLAGS_nleaders);
 
-    LOG_ERROR("Recovery complete!\n");
+    printf("Recovery complete!\n");
     fflush(stdout);
   }
 
@@ -317,3 +279,4 @@ main(int argc, char **argv) {
   printf("Bye...\n");
   return ret;
 }
+

@@ -6,7 +6,6 @@ tmp=0
 for dir in $1/results-*; do
     fname="clients.concat"
     cd $dir
-#    echo $dir
 
     counter=0
     for i in $(find . -name "*.dat"); do

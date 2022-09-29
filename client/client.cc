@@ -2,18 +2,19 @@
 
 std::string my_ip;
 std::string proxy_ip;
-uint32_t offset;  // For recovery
+uint32_t offset;
 
 static constexpr uint8_t kWarmup = 4;
-static constexpr double kAppLatFac = 3.0;        // Precision factor for latency
+static constexpr double
+    kAppLatFac = 2.0;
 volatile bool experiment_over = false;
 size_t numa_node = 0;
 
+// fwd decls for send_request
 static void op_cont_func(void *, void *);
-
-
-uint64_t nsequence_spaces;
-
+static void read_cont_func(void *, void *);
+void send_request(ClientContext *, Operation *, bool);
+size_t failover_to = 1;
 
 // Handle connections initiated by us
 void
@@ -29,7 +30,7 @@ sm_handler(int session_num __attribute__((unused)),
       "Got a SM error: " + erpc::sm_err_type_str(sm_err_type));
 
   if (!(sm_event_type == erpc::SmEventType::kConnected ||
-        sm_event_type == erpc::SmEventType::kDisconnected)) {
+      sm_event_type == erpc::SmEventType::kDisconnected)) {
     throw std::runtime_error("Unexpected SM event!");
   }
 
@@ -41,7 +42,6 @@ sm_handler(int session_num __attribute__((unused)),
     c->nconnections--;
   }
 }
-
 
 // Lifted nearly verbatim from erpc code:
 // https://github.com/erpc-io/eRPC/blob/master/apps/small_rpc_tput/small_rpc_tput.cc
@@ -66,10 +66,10 @@ struct app_stats_t {
 
   std::string to_string() {
     return std::to_string(mrps) + "," + std::to_string(lat_us_50) +
-           "," + std::to_string(lat_us_99)
-           + "," + std::to_string(lat_us_999)
-           + "," + std::to_string(lat_us_9999)
-           + "," + std::to_string(num_re_tx);
+        "," + std::to_string(lat_us_99)
+        + "," + std::to_string(lat_us_999)
+        + "," + std::to_string(lat_us_9999)
+        + "," + std::to_string(num_re_tx);
   }
 
   /// Accumulate stats
@@ -83,7 +83,6 @@ struct app_stats_t {
     return *this;
   }
 };
-
 
 // Lifted (almost) verbatim from erpc code:
 // https://github.com/erpc-io/eRPC/blob/master/apps/small_rpc_tput/small_rpc_tput.cc
@@ -127,69 +126,76 @@ noop_handler(erpc::ReqHandle *req_handle, void *_context) {
   auto *c = reinterpret_cast<ClientContext *>(_context);
   const erpc::MsgBuffer *req_msgbuf = req_handle->get_req_msgbuf();
 
-  fmt_rt_assert(req_handle->get_req_msgbuf()->get_data_size() ==
-                client_payload_size(nsequence_spaces),
-                "noop message not the right size should be %zu is %zu\n",
-                client_payload_size(nsequence_spaces),
-                req_handle->get_req_msgbuf()->get_data_size());
-
-  auto *payload = reinterpret_cast<client_payload_t *>(
+  client_payload_t *payload = reinterpret_cast<client_payload_t *>(
       req_msgbuf->buf);
   erpc::rt_assert(payload->reqtype == ReqType::kNoop,
                   "Got a non-noop request type in the handler!\n");
 
   if (DEBUG_SEQNUMS) {
-    size_t batch_size = 0;
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      batch_size = payload->seq_reqs[0].batch_size;
-      // they should all have the same batch size for now...
-      erpc::rt_assert(batch_size == payload->seq_reqs[j].batch_size);
-    }
-
-    std::string lines;
-    for (size_t j = 0; j < batch_size; j++) {
-      lines += get_formatted_time_from_offset(offset);
-      for (size_t k = 0; k < nsequence_spaces; k++) {
-        lines += " " + std::to_string(payload->seq_reqs[k].seqnum);
-      }
-      lines += " \n";
-    }
-    fprintf(c->fp, "%s", lines.c_str());
-  } else if (PLOT_RECOVERY) {
-    print_seqreqs(payload->seq_reqs, nsequence_spaces);
-    std::string time = get_formatted_time_from_offset(offset);
-    std::string line;
-    seq_req_t *sr = payload->seq_reqs;
-    size_t max_bs = 0;
-    for (size_t i = 0; i < nsequence_spaces; i++) {
-      max_bs = max_bs < sr[i].batch_size ? sr[i].batch_size : max_bs;
-    }
-
-    while (max_bs > 0) {
-      line += time;
-      for (size_t i = 0; i < nsequence_spaces; i++) {
-        line += " ";
-        if (sr[i].batch_size > 0) {
-          line += std::to_string(sr[i].seqnum);
-          sr[i].seqnum--;
-          sr[i].batch_size--;
-        } else {
-          line += "0";
-        }
-      }
-      line += "\n";
-      max_bs--;
-    }
-    LOG_ERROR("cid %d got noops: %s\n", c->client_id, line.c_str());
-    fprintf(c->fp, "%s", line.c_str());
+    fprintf(c->fp, "%lu\n", payload->seqnum);
+  } else if (PLOT_RECOVERY || CHECK_FIFO) {
+    fprintf(c->fp, "%s %lu %lu\n",
+            get_formatted_time_from_offset(offset).c_str(),
+            payload->seqnum,
+            payload->client_reqid);
   }
+
+  LOG_FAILOVER("Client %zu received noop. Acking\n", c->thread_id);
 
   c->rpc->resize_msg_buffer(
       &req_handle->pre_resp_msgbuf, 1);
   c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
 }
 
+// Check if operation's seqnum has been persisted at DTs; if yes,
+// respond to client. If not, put in minPQ and wait for persistence.
+inline void
+corfu_append_cont_func(void *_context, void *_tag) {
+  auto *c = reinterpret_cast<ClientContext *>(_context);
+  auto *tag = reinterpret_cast<Tag *>(_tag);
+  Operation *op = tag->op;
 
+  tag->corfu_replies++;
+
+  // have not finished replicating in Corfu
+  if (tag->corfu_replies != kCorfuReplicationFactor) {
+    int session_num = (*tag->c->log_pos_to_session_num(op->seqnum))[tag->corfu_replies];
+
+    // assumes the entry is unperturbed in the msgbuffer buf
+    c->rpc->enqueue_request(session_num,
+                                 static_cast<uint8_t>(ReqType::kCorfuAppend),
+                                 &tag->req_msgbuf, &tag->resp_msgbuf,
+                                 corfu_append_cont_func, tag);
+  } else {
+    op_cont_func(c, tag);
+  }
+}
+
+void seq_num_cont_func(void *_c, void *_tag) {
+  ClientContext *c = reinterpret_cast<ClientContext *>(_c);
+  Tag *tag = reinterpret_cast<Tag*>(_tag);
+  payload_t *response = reinterpret_cast<payload_t *>(tag->resp_msgbuf.buf);
+  tag->op->seqnum = response->seqnum;
+  tag->corfu_replies = 0;
+  c->rpc->resize_msg_buffer(&tag->req_msgbuf, sizeof(corfu_entry_t));
+  erpc::rt_assert(tag->req_msgbuf.get_data_size() == sizeof(corfu_entry_t),
+                  "req_msgbuf in submit_op was too small\n");
+
+  auto *entry = reinterpret_cast<corfu_entry_t *>(tag->req_msgbuf.buf);
+  entry->log_position = response->seqnum;
+
+  // this is where callbacks will be
+  int session_num;
+  memcpy(entry->entry_val, tag->op->entry_val, MAX_CORFU_ENTRY_SIZE);
+  session_num = (*c->log_pos_to_session_num(entry->log_position))[0];
+
+  c->rpc->enqueue_request(session_num,
+                          static_cast<uint8_t>(ReqType::kCorfuAppend),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          corfu_append_cont_func, reinterpret_cast<void *>(tag));
+}
+
+// this is the start of the append reqauest
 void
 send_request(ClientContext *c, Operation *op, bool new_request) {
   int i = op->local_idx;
@@ -199,35 +205,65 @@ send_request(ClientContext *c, Operation *op, bool new_request) {
   c->last_retx[i] = erpc::rdtsc();
 
   Tag *tag = c->tag_pool.alloc();
+  erpc::rt_assert(tag != nullptr, "send_request got alloc'd a null tag\n");
   tag->alloc_msgbufs(c, op);
 
-  auto *payload =
-      reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
+  // setup corfu entry val
+  memcpy(&op->entry_val, &(op->local_reqid), sizeof(op->local_reqid));
 
-  payload->client_id = c->client_id;
-  payload->client_reqid = op->local_reqid;
-  payload->proxy_id = c->proxy_id;
-  payload->highest_recvd_reqid = c->highest_cons_reqid;
+  erpc::rt_assert(tag->req_msgbuf.get_data_size() == sizeof(client_payload_t) &&
+      sizeof(client_payload_t) >= MAX_CORFU_ENTRY_SIZE, "msgbuf wrong size\n");
 
-  // for now just ask for one number from each sequence space
-  for (size_t j = 0; j < nsequence_spaces; j++) {
-    payload->seq_reqs[j].seqnum = 0;
-    payload->seq_reqs[j].batch_size = 1;
-  }
-
-  c->rpc->enqueue_request(c->sessions[op->cur_px_conn],
-                          static_cast<uint8_t>(ReqType::kExecuteOpA),
-                          &tag->req_msgbuf, &tag->resp_msgbuf,
-                          op_cont_func, reinterpret_cast<void *>(tag));
+  c->rpc->resize_msg_buffer(&tag->req_msgbuf, sizeof(payload_t));
+  c->rpc->enqueue_request(c->seq_session_num,
+                          static_cast<uint8_t>(ReqType::kGetSeqNum),
+                          &(tag->req_msgbuf), &(tag->resp_msgbuf),
+                          seq_num_cont_func, reinterpret_cast<void *>(tag));
 }
 
+void
+send_read_request(ClientContext *c, Operation *op, bool new_request) {
+  int i = op->local_idx;
+
+  // only update this if it is a new request
+  if (likely(new_request)) c->req_tsc[i] = erpc::rdtsc();
+
+  Tag *tag = c->tag_pool.alloc();
+  tag->alloc_msgbufs(c, op);
+  tag->op = op;
+
+  c->rpc->resize_msg_buffer(&tag->req_msgbuf, sizeof(corfu_entry_t));
+  auto *req_entry = reinterpret_cast<corfu_entry_t *>(tag->req_msgbuf.buf);
+
+  // choose a random position between 0 and max_log_position to read at
+  if (FLAGS_max_log_position) {
+    req_entry->log_position = static_cast<uint64_t>(
+        static_cast<uint64_t>(std::rand())
+        % c->max_log_position);
+  } else {
+    // this code should never actually execute?
+    req_entry->log_position = op->read_pos;
+  }
+
+  erpc::rt_assert(tag->req_msgbuf.get_data_size() == sizeof(corfu_entry_t),
+                  "req_msgbuf in submit_op was too small\n");
+
+  // this is where callbacks will be
+  int session_num;
+  session_num = (*c->log_pos_to_session_num(req_entry->log_position))[kCorfuReplicationFactor - 1];
+
+  c->rpc->enqueue_request(session_num,
+                          static_cast<uint8_t>(ReqType::kCorfuRead),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          read_cont_func, reinterpret_cast<void *>(tag));
+}
 
 void
-op_cont_func(void *_context, void *_tag) {
+read_cont_func(void *_context, void *_tag) {
   auto tsc_now = erpc::rdtsc();
 
   auto tag = reinterpret_cast<Tag *>(_tag);
-  Operation *op = tag->op;
+  auto op = tag->op;
   auto c = static_cast<ClientContext *>(_context);
 
   size_t i = op->local_idx;
@@ -238,118 +274,87 @@ op_cont_func(void *_context, void *_tag) {
   }
 
   auto *payload =
-      reinterpret_cast<client_payload_t *>(tag->resp_msgbuf.buf);
+      reinterpret_cast<corfu_entry_t *>(tag->resp_msgbuf.buf);
 
-  op->received_response = true;
-
-  // If the proxy we sent this request to is no longer the leader:
-  //   increment cur_px_conn (%3) if not already done so. And try the next proxy.
-  if (unlikely(payload->not_leader)) {
-    LOG_ERROR("[%zu] op: lid %zu, cid %zu response not leader from %zu\n",
-                 c->thread_id, op->local_reqid,
-                 op->local_idx, op->cur_px_conn);
-
-    c->next_proxy(op);
-
-    if (!force_quit) {
-      send_request(c, op, false);
-    }
-    c->tag_pool.free(tag);
-    return;
-  }
-
-  // If mismatch with client_reqid > local_reqid, then we die!
-  // It's OK if client_reqid < local_reqid, because this could be an app-level retransmit from a
-  // proxy. We are potentially repeatedly sending requests to proxies for the same reqid, so
-  // it is possible they can be satisfied twice.
-  fmt_rt_assert(payload->client_reqid <= op->local_reqid,
-                "[%s] Thread %zu: Mismatch: op: %zu received reqid %lu, "
-                "expected %lu op %p tag %p\n",
-                erpc::get_formatted_time().c_str(),
-                c->thread_id, op->local_idx,
-                payload->client_reqid, op->local_reqid, tag->op, tag);
-
-  // ...but we should ignore the retransmit if we've seen this seqnum already
-  if (payload->client_reqid < op->local_reqid) {
-    return;
-  }
-
-  if (DEBUG_SEQNUMS) {
-    size_t batch_size = 0;
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      batch_size = payload->seq_reqs[0].batch_size;
-      // they should all have the same batch size for now...
-      erpc::rt_assert(batch_size == payload->seq_reqs[j].batch_size);
-    }
-
-    std::string lines;
-    for (size_t j = 0; j < batch_size; j++) {
-      lines += get_formatted_time_from_offset(offset);
-      for (size_t k = 0; k < nsequence_spaces; k++) {
-        lines += " " + std::to_string(payload->seq_reqs[k].seqnum);
-      }
-      lines += " \n";
-    }
-    fprintf(c->fp, "%s", lines.c_str());
-  } else if (PLOT_RECOVERY) {
-    std::string time = get_formatted_time_from_offset(offset);
-    std::string line;
-    seq_req_t *sr = payload->seq_reqs;
-    size_t max_bs = 0;
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      max_bs = max_bs < sr[j].batch_size ? sr[j].batch_size : max_bs;
-    }
-
-    while (max_bs > 0) {
-      line += time;
-      for (size_t j = 0; j < nsequence_spaces; j++) {
-        line += " ";
-        if (sr[j].batch_size > 0) {
-          line += std::to_string(sr[j].seqnum);
-          sr[j].seqnum--;
-          sr[j].batch_size--;
-        } else {
-          line += "0";
-        }
-      }
-      line += "\n";
-      max_bs--;
-    }
-    fprintf(c->fp, "%s", line.c_str());
-  }
-
-  // good response, record req_id and update highest_cons_reqid
-  c->push_and_update_highest_cons_req_id(payload->client_reqid);
-
-  if (unlikely(payload->seq_reqs[0].seqnum % 1000000 == 0)) {
-    LOG_INFO("Thread %zu: Got seqnums for local_reqid %zu, "
-             "idx %zu from node %zu latency %f\n",
-        c->thread_id, payload->client_reqid, i, op->cur_px_conn,
+  // This is a good response! was 10000
+  if (unlikely(payload->log_position % 10000000 == 0)) {
+    printf(
+        "Thread %lu: Got read response retcode %u log_position %lu val %lu for local_reqid %lu, idx %zu from node %zu latency %f\n",
+        c->thread_id, static_cast<uint8_t>(payload->return_code),
+        payload->log_position, *reinterpret_cast<int64_t *>(payload->entry_val),
+        op->local_reqid, i, op->cur_px_conn,
         erpc::to_usec(tsc_now - c->req_tsc[i], c->rpc->get_freq_ghz()));
-    print_seqreqs(payload->seq_reqs, nsequence_spaces);
-    LOG_INFO("Thread %zu: highest_cons_req_id %zu\n", c->thread_id,
-             c->highest_cons_reqid);
   }
+
 
   // Create the new op
   if (likely(!force_quit && !experiment_over)) {
-    // Record latency info
+    // Record latency stuff
     if (likely(c->state == State::experiment)) {
       size_t req_tsc = c->req_tsc[i];
-      double req_lat_us = erpc::to_usec(tsc_now - req_tsc,
-                                        c->rpc->get_freq_ghz());
+      double
+          req_lat_us = erpc::to_usec(tsc_now - req_tsc, c->rpc->get_freq_ghz());
       c->latency.update(static_cast<size_t>(req_lat_us * kAppLatFac));
       c->stat_resp_rx_tot++;
     }
 
     c->ops[i]->reset(c->reqid_counter++);
-    send_request(c, op, true);
+
+    c->tag_pool.free(tag);
+    send_read_request(c, op, true);
   } else if (unlikely(experiment_over)) {
+    c->tag_pool.free(tag);
     c->completed_slots++;
   }
-  c->tag_pool.free(tag);
 }
 
+void
+op_cont_func(void *_context, void *_tag) {
+  auto tsc_now = erpc::rdtsc();
+
+  fflush(stdout);
+  auto tag = reinterpret_cast<Tag *>(_tag);
+  Operation *op = tag->op;
+  ClientContext *c = static_cast<ClientContext *>(_context);
+
+  size_t i = op->local_idx;
+
+  // this is a failure-with-continuation
+  if (unlikely(tag->resp_msgbuf.get_data_size() == 0)) {
+    erpc::rt_assert(false, "Client Failure with continuation!\n");
+  }
+
+  // this is for proxy dailure detection which doesn't happen anymore
+  op->received_response = true;
+
+  // This is a good response! was 10000
+  if (unlikely(op->seqnum % 10000 == 0)) {
+    LOG_INFO(
+        "Thread %zu: Got seqnum %zu for local_reqid %zu, idx %zu from node %zu latency %f\n",
+        c->thread_id, op->seqnum, op->local_reqid, i, op->cur_px_conn,
+        erpc::to_usec(tsc_now - c->req_tsc[i], c->rpc->get_freq_ghz()));
+  }
+
+  // Create the new op
+  if (likely(!force_quit && !experiment_over)) {
+    // Record latency stuff
+    if (likely(c->state == State::experiment)) {
+      size_t req_tsc = c->req_tsc[i];
+      double req_lat_us =
+          erpc::to_usec(tsc_now - req_tsc, c->rpc->get_freq_ghz());
+      c->latency.update(static_cast<size_t>(req_lat_us * kAppLatFac));
+      c->stat_resp_rx_tot++;
+    }
+
+    c->ops[i]->reset(c->reqid_counter++);
+
+    c->tag_pool.free(tag);
+    send_request(c, op, true);
+  } else if (unlikely(experiment_over)) {
+    c->tag_pool.free(tag);
+    c->completed_slots++;
+  }
+}
 
 // Initialize state needed for client operation
 void
@@ -357,9 +362,9 @@ create_client(ClientContext *c) {
   (void) c;
 }
 
-
 void
-establish_proxy_connection(ClientContext *c, int remote_tid,
+establish_proxy_connection(ClientContext *c,
+                           int remote_tid,
                            std::string proxy_ip) {
   std::string uri;
   std::string port = ":31850";
@@ -379,6 +384,85 @@ establish_proxy_connection(ClientContext *c, int remote_tid,
   LOG_INFO("Thread %zu: connected!\n", c->thread_id);
 }
 
+void
+establish_sequencer_connection(ClientContext *c, int remote_tid,
+                               std::string sequencer_ip) {
+  std::string uri;
+  std::string port = ":31850";
+  uri = sequencer_ip + port;
+
+  LOG_INFO("Thread %zu: Connecting with uri %s, remote_tid %d\n",
+           c->thread_id, uri.c_str(), remote_tid);
+
+  auto sn = c->rpc->create_session(uri, remote_tid);
+  erpc::rt_assert(sn >= 0, "Failed to create session");
+
+  c->seq_session_num = sn;
+
+  while (!c->rpc->is_connected(sn) && !force_quit) {
+    c->rpc->run_event_loop_once();
+  }
+  LOG_INFO("Thread %zu: Connected to the sequencer with session num %d\n",
+           c->thread_id, c->seq_session_num);
+}
+
+// Connect to Rpc endpoints and push session numbers onto session vector
+// for future use
+int
+connect_to_corfu_machine(ClientContext *c,
+                         size_t idx, size_t rep_num, size_t sv_i) {
+  std::string uri;
+  std::string port = ":31850";
+  int session_num;
+
+  uri = c->corfu_ips[idx] + port;
+
+  for (uint8_t thread = 0; thread < N_CORFUTHREADS; thread++) {
+    printf("[%zu] Connecting CorfuServer with uri %s, remote_tid %d\n",
+           c->thread_id, uri.c_str(), thread);
+
+    session_num = c->rpc->create_session(uri, thread);
+
+    erpc::rt_assert(session_num >= 0, "Failed to create session");
+
+    while (!c->rpc->is_connected(session_num) && !force_quit) {
+      c->rpc->run_event_loop_once();
+    }
+
+    c->corfu_session_nums[sv_i + thread][rep_num] = session_num;
+    printf("[%zu] Connected to sv_i %zu thread %d  rep_num %zu with"
+           " session num: %d\n",
+           c->thread_id, sv_i, thread, rep_num, session_num);
+  }
+  fflush(stdout);
+
+  return 0;
+}
+
+// n_corfu_servers is the number of logical servers (threads)
+void
+establish_corfu_connections(ClientContext *c) {
+  printf("Establishing corfuips size %lu NCORFUTHREADS %d repfac %zu %lu "
+         "Corfu connections... \n",
+         c->corfu_ips.size(), N_CORFUTHREADS, kCorfuReplicationFactor,
+         (c->corfu_ips.size()*N_CORFUTHREADS)/kCorfuReplicationFactor);
+  c->corfu_session_nums.resize((c->corfu_ips.size()*N_CORFUTHREADS)/kCorfuReplicationFactor);
+
+  for (size_t i = 0; i < c->corfu_session_nums.size(); i++)
+    c->corfu_session_nums[i].resize(kCorfuReplicationFactor);
+
+  size_t rep_num = 0;
+  size_t j = 0;
+
+  for (size_t i = 0; i < c->corfu_ips.size(); i++) {
+    connect_to_corfu_machine(c, i, rep_num, j);
+
+    rep_num = (rep_num + 1) % kCorfuReplicationFactor;
+    if (rep_num == 0) j += N_CORFUTHREADS;
+  }
+
+  printf("...done establishing Corfu connections.\n");
+}
 
 uint16_t
 get_client_id(size_t thread_id) {
@@ -399,8 +483,7 @@ get_client_id(size_t thread_id) {
  * tid: this clients thread id
  * nexus: pointer to machine's nexus
  * app_stats: pointer to machine's app_stats
- * proxy_id: the logical proxy (replica group) id this client thread
- *   should submit requests to
+ * proxy_id: the logical proxy (replica group) id this client thread should submit requests to
  *
  * TODO: rebalance clients based on physical threads
  *
@@ -420,16 +503,22 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
 
   c.client_id = get_client_id(tid);
 
-  LOG_INFO("Thread %zu client_id is %u\n", c.thread_id, c.client_id);
+  // make a list of all the corfu ips
+  boost::split(c.corfu_ips, FLAGS_corfu_ips, boost::is_any_of(","));
 
+  LOG_INFO("Thread %zu: In client_thread_func\n", c.thread_id);
+  printf("got to thread_func\n"); fflush(stdout);
+
+  c.max_log_position = FLAGS_max_log_position;
+
+  erpc::rt_assert(RAND_MAX > c.max_log_position);
+  
+  LOG_INFO("Thread %zu client_id is %u mlp %zu sizeof client_payload_t %zu\n",
+           c.thread_id, c.client_id, c.max_log_position,
+           sizeof(client_payload_t));
   LOG_INFO(
-      "Thread ID: %zu proxy_id start %d "
-      "tid %zu "
-      "nproxy_threads %zu "
-      "c.proxy_id %d\n",
+      "Thread ID: %zuproxy_id start %d tid %zu nproxy_threads %zu c.proxy_id %d\n",
       tid, proxy_id_start, tid, FLAGS_nproxy_threads, c.proxy_id);
-  LOG_INFO("Thread ID: %zu starting with %zu sequence spaces\n",
-           c.thread_id, nsequence_spaces);
 
   if (DEBUG_SEQNUMS) {
     char fname[100];
@@ -438,8 +527,11 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
     erpc::rt_assert(c.fp != NULL, "Couldn't open fd for seqnums!");
   } else if (PLOT_RECOVERY || CHECK_FIFO) {
     char fname[100];
-    snprintf(fname, 100, "seqnums-%s-%zu.receivedSequenceNumbers",
-             FLAGS_my_ip.c_str(), tid);
+    snprintf(fname,
+             100,
+             "seqnums-%s-%zu.receivedSequenceNumbers",
+             FLAGS_my_ip.c_str(),
+             tid);
     c.fp = fopen(fname, "w+");
     erpc::rt_assert(c.fp != NULL, "Couldn't open fd for recovery!");
   }
@@ -458,25 +550,28 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
   LOG_INFO("Created RPC endpoint for tid %zu, proxy_id %d...\n",
            tid, c.proxy_id);
 
-  // Establish connections to the proxies in our group.
-  // Assumes they are all alive when this thread starts.
-  establish_proxy_connection(&c, remote_tid, FLAGS_proxy_ip_0);
-  establish_proxy_connection(&c, remote_tid, FLAGS_proxy_ip_1);
-  establish_proxy_connection(&c, remote_tid, FLAGS_proxy_ip_2);
+  establish_sequencer_connection(&c, tid % N_SEQTHREADS, FLAGS_seq_ip);
+  establish_corfu_connections(&c);
 
   c.allocate_ops();
   LOG_INFO("Thread %zu: Finished allocating mbufs\n", tid);
 
-  // Enqueue a bunch of requests...
+  // Enqueue FLAGS_concurrency requests in parallel...
   for (size_t i = 0; i < FLAGS_concurrency; i++) {
     c.ops[i]->reset(c.reqid_counter++);
-    LOG_INFO("starting sending request %lu\n", i);
-    send_request(&c, c.ops[i], true);
+
+    if (FLAGS_max_log_position) {//unlikely(i==0 && c.thread_id == 0))
+      LOG_INFO("starting sending read request %lu\n", i);
+      send_read_request(&c, c.ops[i], true);
+    } else {
+      LOG_INFO("starting sending append request %lu\n", i);
+      send_request(&c, c.ops[i], true);
+    }
   }
 
-  LOG_INFO("Starting main loop in thread %zu...\n", tid);
+  // The main loop!
+  LOG_INFO("\nStarting main loop in thread %zu...\n", tid);
 
-  // Add some time for warmup/cooldown
   Timer timer;
   timer.init(kWarmup*SEC_TIMER_US, nullptr, nullptr);
   c.state = State::warmup;
@@ -517,59 +612,40 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
         for (size_t k = 0; k < FLAGS_concurrency; k++) {
           c.ops[k]->received_response = false;
         }
-        // sync to disk ~once per second, prevent clients pausing for a long time
-        // to sync to disk.
-        if (PLOT_RECOVERY) {
-          fsync(fileno(c.fp));
-        }
       }
     }
-
     run_event_loop_us(c.rpc, 1000);
-
-    if (c.state == State::experiment) {
-      size_t k = 0;
-      double now = erpc::to_sec(erpc::rdtsc(), c.rpc->get_freq_ghz());
-      for (k = 0; k < FLAGS_concurrency; k++) {
-        if (!c.ops[k]->received_response &&
-            (now - erpc::to_sec(c.last_retx[k], c.rpc->get_freq_ghz())) >
-            failover_to) {
-          if (k == 0) {
-            LOG_INFO("Thread ID: %zu DECLARING PROXY %zu DEAD! "
-                     "op %zu did not receive a response in the "
-                     "last %lf seconds, changing proxies from %zu to %zu\n",
-                     c.thread_id, c.ops[k]->cur_px_conn, c.ops[k]->local_reqid,
-                     failover_to,
-                     c.ops[k]->cur_px_conn,
-                     (c.ops[k]->cur_px_conn + 1) % 3);
-          }
-
-          // use the next proxy and then retransmit requests with the same req_id
-          c.next_proxy(c.ops[k]);
-          send_request(&c, c.ops[k], false);
-        }
-      }
-    } else {
-      // in warmup/cooldown
-      // LOG_INFO("Thread ID: %zu in warmup or cooldown\n", c.thread_id);
-    }
   }
 
   LOG_INFO(
       "[%s] Thread %zu experiment is over, no longer submitting requests...\n",
-      erpc::get_formatted_time().c_str(), c.thread_id);
+      erpc::get_formatted_time().c_str(),
+      c.thread_id);
 
   experiment_over = true;
 
   if (tid == 0) {
     LOG_INFO("Thread 0: Cleaning up...\n");
 
+    char hostname[256];
+    int result;
+    result = gethostname(hostname, 256);
+    erpc::rt_assert(!result, "Couldn't resolve hostname");
+    std::string hname(hostname, hostname + strlen(hostname));
+
     char fname[100];
+    std::vector<std::string> strs;
+    boost::split(strs, hname, boost::is_any_of("."));
+
+    std::vector<std::string> tmp;
+    boost::split(tmp, strs[0], boost::is_any_of("-"));
     sprintf(fname, "%s/%s", FLAGS_out_dir.c_str(), FLAGS_results_file.c_str());
+
+    LOG_INFO("Thread 0 writing results to file: %s\n", fname);
 
     FILE *fp;
     fp = fopen(fname, "w+");
-    erpc::rt_assert(fp != nullptr, "fp was NULL\n");
+    erpc::rt_assert(fp != NULL, "fp was NULL\n");
 
     fwrite(c.stats, sizeof(char), strlen(c.stats), fp);
 
@@ -586,7 +662,6 @@ client_thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats,
   LOG_INFO("Exiting thread %zu\n", tid);
 }
 
-
 // Launch proxy worker threads with configured numbers of leaders/followers
 void
 client_launch_threads(size_t nthreads, erpc::Nexus *nexus) {
@@ -595,27 +670,26 @@ client_launch_threads(size_t nthreads, erpc::Nexus *nexus) {
   std::vector<std::thread> threads(nthreads);
 
   // each client thread needs the ips of 3 proxy machine
+
   for (size_t i = 0; i < nthreads; i++) {
     LOG_INFO("Setting up thread %zu...\n", i);
 
     LOG_INFO("threads size: %zu\n", threads.size());
 
     // FLAGS_proxy_id is the machine raft id of the proxy it is connecting to
-    threads[i] = std::thread(client_thread_func, i, nexus, app_stats,
-                             FLAGS_proxy_id);
+    threads[i] =
+        std::thread(client_thread_func, i, nexus, app_stats, FLAGS_proxy_id);
     erpc::bind_to_core(threads[i],
                        nthreads > 8 ? i % 2 : numa_node,
                        nthreads > 8 ? i / 2 : i);
   }
 
-  // for (auto &thread : threads) thread.join();
   for (size_t i = 0; i < nthreads; i++) {
     threads[i].join();
     LOG_INFO("Joined thread %zu\n", i);
   }
   delete[] app_stats;
 }
-
 
 static void
 signal_handler(int signum) {
@@ -651,12 +725,12 @@ signal_handler(int signum) {
     backtrace_symbols_fd(array, size, STDERR_FILENO);
     fflush(stdout);
   }
-  fmt_rt_assert(false, "Received a signal %d!", signum);
+  erpc::rt_assert(false, "");
 }
 
 int
 main(int argc, char **argv) {
-  struct timespec t{};
+  struct timespec t;
   clock_gettime(CLOCK_REALTIME, &t);
   offset = t.tv_sec * 1000000 + t.tv_nsec / 1000;
 
@@ -669,20 +743,27 @@ main(int argc, char **argv) {
   LOG_INFO("Parsing command line args...\n");
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-  nsequence_spaces = FLAGS_nsequence_spaces;
-
-  erpc::rt_assert(FLAGS_nsequence_spaces > 0,
-                  "Can not have 0 sequence spaces\n");
   erpc::rt_assert(FLAGS_concurrency <= MAX_CONCURRENCY,
                   "Concurrency is too large!");
   erpc::rt_assert(FLAGS_nproxy_leaders > 0,
                   "Must specify nproxy_leaders");
+
   erpc::rt_assert(FLAGS_nproxy_threads > 0,
                   "Must specify nproxy_threads");
 
   my_ip = FLAGS_my_ip;
 
+  // Make sure we have enough ring buffers; shouldn't really be a
+  // problem for the clients
+//    size_t num_sessions = FLAGS_nthreads;
+//    erpc::rt_assert(num_sessions * erpc::kSessionCredits <=
+//           erpc::Transport::kNumRxRingEntries,
+//          "Too few ring buffers");
+
   LOG_INFO("Passed check for Too few ring buffers.\n");
+
+  if (FLAGS_results_file.empty())
+    erpc::rt_assert(false, "Must specify a results file\n");
 
   std::string uri = my_ip + ":31850";
   LOG_INFO("Creating nexus object for URI %s...\n", uri.c_str());
@@ -691,6 +772,11 @@ main(int argc, char **argv) {
   nexus.register_req_func(
       static_cast<uint8_t>(ReqType::kRecordNoopSeqnum),
       noop_handler);
+
+  // Connections are per nexus (machine).
+  LOG_INFO("kNumRxRingEntries %zu kSessionCredits %zu max connections %zu\n",
+           erpc::Transport::kNumRxRingEntries, erpc::kSessionCredits,
+           erpc::Transport::kNumRxRingEntries/erpc::kSessionCredits);
 
   LOG_INFO("Launching threads...\n");
   client_launch_threads(FLAGS_nthreads, &nexus);

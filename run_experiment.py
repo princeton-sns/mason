@@ -21,8 +21,6 @@ class Experiment:
         self.whoami = args.whoami
         self.expduration = args.expduration
 
-        self.nsequence_spaces = args.nsequence_spaces
-
         # client stuff
         self.nclient_threads = args.nclient_threads
         self.nclients = args.nclients
@@ -31,7 +29,7 @@ class Experiment:
         # Keyed by machine name (e.g., client-0); value is a dictionary
         # with keys 'machineid' (Emulab machine ID) and 'mac'
         (self.sequencers, self.available_proxies,
-            self.available_clients) = self.parse_machine_info()
+            self.available_clients, self.available_corfu_servers) = self.parse_machine_info()
 
         self.no_gc = args.no_gc
         self.batch_timeout = args.batch_timeout
@@ -39,13 +37,29 @@ class Experiment:
         self.nsequencers = len(self.sequencers)
         self.nclient_machines = len(self.available_clients)
 
+        # ???
         self.nbackend_servers = args.nbackend_servers
+
+        # Corfu
+        self.ncorfu_servers = args.ncorfu_servers
+        self.corfu_replication_factor = args.corfu_replication_factor
+        self.corfu_servers_keys = sorted(self.available_corfu_servers.keys())[:self.ncorfu_servers]
+
+        # print([self.available_corfu_servers[x] for x in self.corfu_servers])
+
+        self.corfu_ips = ''
+        for key in self.corfu_servers_keys:
+            self.corfu_ips += '%s,' % self.available_corfu_servers[key]['ctrl_ip']
+        self.corfu_ips = self.corfu_ips[:-1]
+        print(self.corfu_ips)
 
         # proxy stuff
         self.nproxy_threads = args.nproxy_threads
         self.nproxy_leaders = args.nproxy_leaders
 
         self.max_log_size = args.max_log_size
+
+        self.max_log_position = args.max_log_position
 
         if args.nproxies is None:
             self.nproxies = len(self.available_proxies)
@@ -76,6 +90,7 @@ class Experiment:
         # killing stuff
         self.time_to_kill_sequencer = args.kill_sequencer
         self.time_to_kill_leader = args.kill_leader
+        self.time_to_kill_all_leaders = args.kill_all_leaders
         self.only_kill_zombies = args.only_kill_zombies
 
         sequencer_list = list(self.sequencers.keys())
@@ -95,7 +110,10 @@ class Experiment:
         exp_outdir = args.outdir
 
         # tmp dir will stage data until the experiment is over (easier to monitor)
-        self.tmpdir = os.path.join(self.home, "results", exp_outdir)
+        # self.tmpdir = os.path.join(self.home, "results", "tmp")
+        #
+        self.tmpdir = os.path.join(self.home, "results", exp_outdir)#"results-%d" %
+                                   #timestamp)
 
         shutil.rmtree(self.tmpdir, ignore_errors=True)
         try:
@@ -136,14 +154,12 @@ class Experiment:
 
         proxy_id_start = -experiment.nproxy_threads
 
-        next_neighbor0 = {'ctrl_ip': ''}
-        next_neighbor1 = {'ctrl_ip': ''}
-        next_neighbor2 = {'ctrl_ip': ''}
+        next_neighbor = {'ctrl_ip': ''}
         for i, proxy in enumerate(self.proxy_list):
             me = self.available_proxies[proxy]
 
             if my_raft_id == 0:
-                # so that it starts at 0
+                # so that it starts at 0... ew
                 proxy_id_start += experiment.nproxy_threads
 
                 rep_ips[0] = me['ctrl_ip']
@@ -151,13 +167,24 @@ class Experiment:
                 rep_ips[2] = self.available_proxies[self.proxy_list[(i + 2) % len(self.proxy_list)]]['ctrl_ip']
 
                 # for now next neigher is the leader of the next group!, this will need to be changed for failover
-                # we need to speak with the leader of the next group which may change!
+                # we need to speak with the leader of the next group which may change!!!
                 if experiment.nproxies > 3:
-                    next_neighbor0 = self.available_proxies[self.proxy_list[(i + 3) % len(self.proxy_list)]]
-                    next_neighbor1 = self.available_proxies[self.proxy_list[(i + 4) % len(self.proxy_list)]]
-                    next_neighbor2 = self.available_proxies[self.proxy_list[(i + 5) % len(self.proxy_list)]]
+                    next_neighbor = self.available_proxies[self.proxy_list[(i + 3) % len(self.proxy_list)]]
 
-            p = self.launch_proxy(i, me, next_neighbor0, next_neighbor1, next_neighbor2, my_raft_id, (my_raft_id+1) % 3, (my_raft_id+2) % 3,
+
+            # if my_raft_id == 0:
+            #     replica_1 = self.available_proxies[self.proxy_list[(i + 1) % len(self.proxy_list)]]['ctrl_ip']
+            #     replica_2 = self.available_proxies[self.proxy_list[(i + 2) % len(self.proxy_list)]]['ctrl_ip']
+            # elif my_raft_id == 1:
+            #     replica_1 = self.available_proxies[self.proxy_list[(i + 1) % len(self.proxy_list)]]['ctrl_ip']
+            #     replica_2 = self.available_proxies[self.proxy_list[(i - 1) % len(self.proxy_list)]]['ctrl_ip']
+            # elif my_raft_id == 2:
+            #     replica_1 = self.available_proxies[self.proxy_list[(i - 2) % len(self.proxy_list)]]['ctrl_ip']
+            #     replica_2 = self.available_proxies[self.proxy_list[(i - 1) % len(self.proxy_list)]]['ctrl_ip']
+
+            # assert replica_1 != '' and replica_2 != ''
+
+            p = self.launch_proxy(i, me, next_neighbor, my_raft_id, (my_raft_id+1) % 3, (my_raft_id+2) % 3,
                                   rep_ips[(my_raft_id+1) % 3], rep_ips[(my_raft_id+2) % 3], proxy_id_start)
             subprocesses.append(p)
 
@@ -178,15 +205,22 @@ class Experiment:
         proxy_id_start = 0
         nproxies = len(self.available_proxies)
         for j, client in enumerate(self.client_list):
+            # global_threadid = j % (nproxies*self.nproxy_threads)
+            # proxy_idx = global_threadid//self.nproxy_threads
+            # proxy_threadid = global_threadid - proxy_idx * self.nproxy_threads
             proxy_threadid = 0  # dummy var
             proxy_idx = j % nproxies
+
+            # proxy_name = self.proxy_list[proxy_idx]
+            # proxy_info = self.available_proxies[proxy_name]
+            # proxy_ip = proxy_info['ctrl_ip']
 
             rep_ips[0] = self.available_proxies[self.proxy_list[(cnt) % len(self.proxy_list)]]['ctrl_ip']
             rep_ips[1] = self.available_proxies[self.proxy_list[(cnt + 1) % len(self.proxy_list)]]['ctrl_ip']
             rep_ips[2] = self.available_proxies[self.proxy_list[(cnt + 2) % len(self.proxy_list)]]['ctrl_ip']
 
             # this is so that clients are given to proxy groups (all proxy groups in proxy threads are on the same machine)
-            # in round-robin order.
+            # in round-robin order. todo Create some proxy group struct to get rid of the nasty bug-prone code!
             cnt += 3
 
             if rep_ips[0] in map:
@@ -208,11 +242,18 @@ class Experiment:
 
             # there better be a multiple of 3 proxies in the replicated setting
             assert(self.nproxies%3 == 0)
+            # proxy_id = j % (self.nproxies//3)
 
+            # todo figure out proxy_id in the general case
             p = self.launch_client(client, rep_ips[0], rep_ips[1], rep_ips[2], proxy_threadid, proxy_id_start)
 
             # next group starts at where this one started plus threads per proxy machine, but want to wrap around by total threads
             proxy_id_start = (proxy_id_start + self.nproxy_threads) % (self.nproxy_threads * (len(self.proxy_list)/3))
+
+            # todo there is a better way somehow
+            # if (proxy_threadid == self.nproxy_threads):
+            #     proxy_machine_id = (proxy_machine_id + 1) % len(self.proxy_list)
+
 
             subprocesses.append(p)
 
@@ -223,6 +264,36 @@ class Experiment:
 
         return subprocesses
 
+    def launch_corfu_servers(self):
+        subprocesses = []
+        for i, corfu_server in enumerate(self.corfu_servers_keys):
+            me = self.available_corfu_servers[corfu_server]
+
+            # launch
+            corfu_server_name = me['name']
+
+            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+                                                  me['machineid'])
+
+            assert(self.ncorfu_servers > 0)
+            cmd = ("cd %s;" % os.path.join(os.getcwd(), "corfu_server") +
+                   " %s" % self.numactl_string +
+                   # " valgrind -v -v -v --tool=cachegrind" +
+                   " ./corfu_server" +
+                   " --my_ip %s" % me['ctrl_ip'] +
+                   " --ncorfu_servers %d" % self.ncorfu_servers +
+                   " --max_log_position %d" % self.max_log_position
+                   )
+
+            cmd += " &> %s/%s.log" % (self.tmpdir, corfu_server_name)
+            cmd = "%s '%s'" % (ssh, cmd)
+            print("Command: %s\n" % cmd)
+            p = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
+
+            subprocesses.append(p)
+
+        atexit.register(self.kill_processes, subprocesses)
+        return subprocesses
 
     def launch_machine(self, machine):
         # For sequencers
@@ -241,13 +312,12 @@ class Experiment:
 
         if machine_type == 'sequencer':
             cmd += " --nleaders %d" % self.nproxy_leaders
-            cmd += " --nsequence_spaces %d" % self.nsequence_spaces
-        if machine_name.split("-")[1] != "0":
+            if machine_name.split("-")[1] != "0":
                 proxy_ips = ",".join([self.available_proxies[p]["ctrl_ip"] 
                         for p in self.proxy_list])
                 cmd += " --other_ips %s" % proxy_ips
                 cmd += " --am_backup"
-                cmd += " --out_dir %s" % self.tmpdir
+                cmd += " --out_dir %s" % self.tmpdir;
 
         # Dump program output to file to make sure things don't go wrong
         cmd += " &> %s/%s.log" % (self.tmpdir, machine_name)
@@ -266,22 +336,24 @@ class Experiment:
 
         ssh = ("ssh -p 22 %s@%s.emulab.net" % (self.whoami, machineid))
         cmd = ("cd %s;" % client_dir +
-                " %s" % self.numactl_string +
-                " ./client" +
-                " --my_ip %s" % ctrl_ip +
-                " --nthreads %d" % self.nclient_threads + 
-                " --concurrency %d" % self.client_concurrency + 
-                " --nproxy_leaders %d" % self.nproxy_leaders + 
-                " --nproxy_threads %d" % self.nproxy_threads +
-                " --proxy_threadid %d" % proxy_threadid + 
-                " --expduration %d" % self.expduration + 
-                " --proxy_ip_0 %s" % proxy_ip_0 +
-                " --proxy_ip_1 %s" % proxy_ip_1 +
-                " --proxy_ip_2 %s" % proxy_ip_2 +
-                " --proxy_id %d" % proxy_id +
-                " --out_dir '%s'" % experiment.tmpdir +
-                " --results_file %s.dat" % client_name +
-                " --nsequence_spaces %d" % self.nsequence_spaces)
+               " %s" % self.numactl_string +
+               " ./client" +
+               " --my_ip %s" % ctrl_ip +
+               " --nthreads %d" % self.nclient_threads +
+               " --concurrency %d" % self.client_concurrency +
+               " --nproxy_leaders %d" % self.nproxy_leaders +
+               " --nproxy_threads %d" % self.nproxy_threads +
+               " --proxy_threadid %d" % proxy_threadid +
+               " --expduration %d" % self.expduration +
+               " --proxy_ip_0 %s" % proxy_ip_0 +
+               " --corfu_ips %s" % self.corfu_ips +
+               " --proxy_ip_1 %s" % proxy_ip_1 +
+               " --proxy_ip_2 %s" % proxy_ip_2 +
+               " --seq_ip %s" % self.primary_sequencer['ctrl_ip'] +
+               " --proxy_id %d" % proxy_id +
+               " --max_log_position %d" % self.max_log_position +
+               " --out_dir '%s'" % experiment.tmpdir +
+               " --results_file %s.dat" % client_name)
 
         # Dump program output to file to make sure things don't go wrong
         cmd += " &> %s/%s.log" % (self.tmpdir, client_name)
@@ -292,7 +364,7 @@ class Experiment:
         return p
 
 
-    def launch_proxy (self, proxy_id, this_proxy, next_proxy0, next_proxy1, next_proxy2,
+    def launch_proxy (self, proxy_id, this_proxy, next_proxy,
                       my_raft_id, replica_1_raft_id, replica_2_raft_id, replica_1_ip, replica_2_ip, proxy_id_start):
         machineid = this_proxy['machineid']
         proxy_name = this_proxy['name']
@@ -316,22 +388,15 @@ class Experiment:
                 " --replica_1_raft_id %d" % replica_1_raft_id +
                 " --replica_2_raft_id %d" % replica_2_raft_id +
                 " --proxy_id_start %d" % proxy_id_start +
+                " --corfu_ips %s" % self.corfu_ips +
                 " --client_ip %s" % client_ip +
-                " --max_log_size %d" % self.max_log_size +
-                " --nsequence_spaces %d" % self.nsequence_spaces
+                " --max_log_size %d" % self.max_log_size
                 )
-
-        print("self.nsequence_spaces %d args.nsequence_spaces %d"%
-              (self.nsequence_spaces, args.nsequence_spaces))
         if experiment.backup_sequencer['ctrl_ip'] != '':
             cmd += " --backupseq_ip %s" % self.backup_sequencer['ctrl_ip']
 
-        if next_proxy0['ctrl_ip'] != '':
-            cmd += " --nextproxy0_ip %s" % next_proxy0['ctrl_ip']
-        if next_proxy1['ctrl_ip'] != '':
-            cmd += " --nextproxy1_ip %s" % next_proxy1['ctrl_ip']
-        if next_proxy2['ctrl_ip'] != '':
-            cmd += " --nextproxy2_ip %s" % next_proxy2['ctrl_ip']
+        if next_proxy['ctrl_ip'] != '':
+            cmd += " --nextproxy_ip %s" % next_proxy['ctrl_ip']
 
 
         if proxy_id is 0 and not self.no_gc:
@@ -344,6 +409,9 @@ class Experiment:
         cmd += " &> %s/%s.log" % (self.tmpdir, proxy_name)
         cmd = "%s '%s'" % (ssh, cmd)
         print("Command: %s\n" % cmd)
+        # if proxy_id == 0: 
+        #     print("NOT RUNNING PROXY 0!")
+        #     return None
 
         p = subprocess.Popen(cmd, shell=True, preexec_fn=os.setsid)
         return p
@@ -353,6 +421,7 @@ class Experiment:
         sequencers = {}
         proxies = {}
         clients = {}
+        corfu_servers = {}
 
         f = open('setup/machine_info.txt', 'r')
         for line in f.readlines():
@@ -379,8 +448,15 @@ class Experiment:
                     'mac': fields[3],
                     'ctrl_ip': fields[5]
                 }
+            elif 'server' in fields[0]:
+                corfu_servers[fields[0]] = {
+                    'name': fields[0],
+                    'machineid': fields[1],
+                    'mac': fields[3],
+                    'ctrl_ip': fields[5]
+                }
         f.close()
-        return sequencers, proxies, clients
+        return sequencers, proxies, clients, corfu_servers
 
 
     def get_ip_address(self, ifname):
@@ -407,11 +483,8 @@ class Experiment:
         for machine_name, machine_info in itertools.chain(
                 self.available_proxies.items(),
                 self.sequencers.items(),
-                self.available_clients.items()):
-
-            # if 'proxy-0' in machine_name:
-            #     continue
-
+                self.available_clients.items(),
+                self.available_corfu_servers.items()):
             print("Killing %s..." % machine_name)
             ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
                                                   machine_info['machineid'])
@@ -421,34 +494,27 @@ class Experiment:
                 kill_keyword = '[p]roxy'
             elif 'client-' in machine_name:
                 kill_keyword = '[c]lient'
+            elif 'server-' in machine_name:
+                kill_keyword = '[c]orfu_server'
             else:
                 print("Couldn't identify this machine to kill...")
             cmd = "%s 'sudo pkill  -f -9 \"./%s\";" \
                   "sudo rm -f /usr/local/*snapshot*; " \
                   "sudo rm -f /usr/local/*bitmap*; '" % (ssh, kill_keyword)
-            # "sudo find /usr/local/ -name '*snapshot_rand_1*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_2*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_3*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_4*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_5*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_6*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_7*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_8*' | sudo xargs rm -f; " \
-            # "sudo find /usr/local/ -name '*snapshot_rand_9*' | sudo xargs rm -f; "
+                  # "sudo find /usr/local/ -name '*snapshot_rand_1*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_2*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_3*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_4*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_5*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_6*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_7*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_8*' | sudo xargs rm -f; " \
+                  # "sudo find /usr/local/ -name '*snapshot_rand_9*' | sudo xargs rm -f; "
 
-            # cmd = "%s 'sudo pkill  -f -9 \"./%s\"'" \
-            #       "sudo rm -f /usr/local/*snapshot*; " \
-            #       "sudo rm -f /usr/local/*bitmap*; '" % (ssh, kill_keyword)
-            # # "sudo find /usr/local/ -name '*snapshot_rand_1*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_2*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_3*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_4*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_5*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_6*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_7*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_8*' | sudo xargs rm -f; " \
-            # # "sudo find /usr/local/ -name '*snapshot_rand_9*' | sudo xargs rm -f; "% (ssh, kill_keyword)
-            # # print(cmd)
+
+            #"sudo rm -f /usr/local/*snapshot*; " \
+                  #"/usr/local/*bitmap*;'"
+            # print(cmd)
             cmd = shlex.split(cmd)
 
             p = subprocess.Popen(cmd) 
@@ -482,7 +548,6 @@ class Experiment:
         if time_to_kill <= 0:
             print("Not killing leader")
             return
-        print("going to kill a leader for failover...")
 
         time.sleep(time_to_kill + client_warmup) # clients take 5 seconds to start the exp
 
@@ -495,12 +560,36 @@ class Experiment:
         p = subprocess.Popen(cmd)
         p.wait()
         print("Leader killed")
-    
+
+
+    def kill_all_leaders(self):
+        time_to_kill = self.time_to_kill_all_leaders
+        if time_to_kill <= 0:
+            print("Not killing all leaders")
+            return
+
+        time.sleep(time_to_kill + client_warmup) # clients take 5 seconds to start the exp
+
+        ps = []
+        assert(len(self.proxy_list)%3 == 0)
+        print("len proxy list is %d" % len(self.proxy_list))
+        for i in range(0, len(self.proxy_list), 3):
+            print("killing a leader for failover... %s" % self.available_proxies[self.proxy_list[i]])
+            # kill a leader now
+            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.available_proxies[self.proxy_list[i]]['machineid'])
+            kill_keyword = 'proxy'
+            cmd = "%s 'sudo pkill -f -9 \"./%s\"'" % (ssh, kill_keyword)
+            cmd = shlex.split(cmd)
+            ps.append(subprocess.Popen(cmd))
+
+        for p in ps:
+            p.wait()
+        print("killed")
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Run multiple clients.',
             formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    # whoami isn't actually necessary...
     parser.add_argument('whoami',
                         help=('Emulab username'))
     parser.add_argument('--outdir',
@@ -528,6 +617,11 @@ if __name__ == "__main__":
                               'to initiate leader failover. -1 to not kill.'),
                         type=int,
                         default=-1)
+    parser.add_argument('--kill_all_leaders',
+                        help=('The time (in seconds) into the experiment to kill every proxy leader ' +
+                              'to initiate leader failover. -1 to not kill.'),
+                        type=int,
+                        default=-1)
     parser.add_argument('--only_kill_zombies',
                         help=('If this run is to only kill zombies.'),
                         action='store_true')
@@ -552,33 +646,50 @@ if __name__ == "__main__":
     parser.add_argument('--nbackend_servers',
                         help=('Number of backend servers for proxies to connect to.'),
                         type=int,
-                        default=0)
+                        default=2)
     parser.add_argument('--nclients',
                         help=('Number of clients to run, clients are assigned to proxies in ' +
                             'round-robin fashion.'),
                         type=int,
-                        default=1)
+                        default=4)
     parser.add_argument('--client_concurrency',
                         help=('Number of outstanding requests a client can have at once.'),
                         type=int,
-                        default=32)
+                        default=8) # use 4 for best performance for reads
+    parser.add_argument('--ncorfu_servers',
+                        help=('Total number of Corfu servers.'),
+                        type=int,
+                        default=2)
+    parser.add_argument('--corfu_replication_factor',
+                        help=('Number of replicas in each Corfu chain.'),
+                        type=int,
+                        default=2)
+    # creates max_log_position log position from which to randomly read
+    # if anything other than 0 clients create max_log_position log positions and
+    # runs only random reads
+    # if it is 0 clients only append
+    parser.add_argument('--max_log_position',
+                        help=('Max log position to read at for read-only experiments.'),
+                        type=int,
+                        default=0) 
     parser.add_argument('--max_log_size',
                         help=('Specifies when to do compaction. Default: 100000'),
                         type=int,
-                        default=500000)
-    parser.add_argument('--nsequence_spaces',
-                        help=('Total number of sequence spaces.'),
-                        type=int,
-                        default=1)
+                        default=100000)                    
 
     args = parser.parse_args()
     experiment = Experiment(args)
 
+    # let's only set one of these for now
+    assert(args.kill_all_leaders == -1 or args.kill_leader == -1)
+
     sequencer_procs = experiment.launch_machines(experiment.sequencers)
     proxy_procs = experiment.launch_proxies()
+    corfu_procs = experiment.launch_corfu_servers()
 
     # Sleep to make sure the other processes are up
-    time.sleep(2)
+    # was 2, but that wasn't enough to make all of the corfu connections...
+    time.sleep(5)
     client_procs = experiment.launch_clients()
 
     # start thread to time the killing of sequencer
@@ -588,14 +699,21 @@ if __name__ == "__main__":
     kill_leader_process = multiprocessing.Process(
             target=experiment.kill_leader)
 
+    kill_all_leaders_process = multiprocessing.Process(
+            target=experiment.kill_all_leaders)
+
     kill_sequencer_process.start()
     kill_leader_process.start()
+    kill_all_leaders_process.start()
 
     for p in client_procs:
         p.wait()
+
     try:
         os.remove(experiment.tmpdir + "/../latest")
     except:
         pass
     os.symlink(experiment.tmpdir, experiment.tmpdir + "/../latest")
+
     print("Experiment over, data in %s..." % experiment.tmpdir)
+    # shutil.copytree(experiment.tmpdir, experiment.outdir)

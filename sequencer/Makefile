@@ -2,7 +2,7 @@ LIBS = -lerpc -lpthread -lnuma -ldl -ldpdk -lgflags
 ERPC_DIR = /proj/sequencer/eRPC
 INCLUDES = -I $(ERPC_DIR)/src -I /usr/include/dpdk
 
-sequencer: sequencer.cc sequencer.h recovery.h ../common.h ../bitmap.h
+sequencer: sequencer.cc sequencer.h recovery.h ../common.h
 	bash ../ltomake sequencer
 
 slowsequencer: sequencer.cc sequencer.h recovery.h ../common.h

@@ -14,7 +14,8 @@ namespace erpc {
 // Proxies always use 16
 // Corfu's sequencer and servers use 8
 // CorfuMason/ZK-Mason uses 4 for servers and the sequencer
-static constexpr size_t kSessionCredits = 128;
+static constexpr size_t kSessionCredits = 8;
+
 static_assert(is_power_of_two(kSessionCredits), "");
 
 /// Request window size. This must be a power of two for fast multiplication and
@@ -23,6 +24,7 @@ static_assert(is_power_of_two(kSessionCredits), "");
 // Mason: kSessionReqWindow MUST be the same on each endpoint
 // Mason: 128 used for all experiments
 static constexpr size_t kSessionReqWindow = 128;
+
 static_assert(is_power_of_two(kSessionReqWindow), "");
 
 // Invalid metadata values for session endpoint initialization

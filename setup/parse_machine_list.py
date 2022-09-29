@@ -72,6 +72,7 @@ def get_machine_info():
     proxies = []
     sequencers = []
     deptrackers = []
+    corfu_servers = []
     machines = {}
 
     manual_input_flag = 0
@@ -92,6 +93,8 @@ def get_machine_info():
             deptrackers.append(machinename)
         elif "sequencer" in machinename:
             sequencers.append(machinename)
+        elif "server" in machinename:
+            corfu_servers.append(machinename)
         else: 
             clients.append(machinename)
         
@@ -133,7 +136,7 @@ def get_machine_info():
                 " missing values filled in, then hit any key to keep going... ")
         machines, clients, servers = read_machine_info()
 
-    return machines, clients, proxies, sequencers, deptrackers
+    return machines, clients, proxies, sequencers, deptrackers, corfu_servers
 
 
 def read_machine_info():
@@ -141,6 +144,7 @@ def read_machine_info():
     proxies = []
     sequencers = []
     deptrackers = []
+    corfu_servers = []
     machines = {}
 
     f = open("machine_info.txt", "r")
@@ -161,6 +165,8 @@ def read_machine_info():
             deptrackers.append(machinename)
         elif "sequencer" in machinename:
             sequencers.append(machinename)
+        elif "server" in machinename:
+            corfu_servers.append(machinename)
         else: 
             clients.append(machinename)
         
@@ -213,8 +219,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.read_info:
-        machines, clients, proxies, sequencers, deptrackers = read_machine_info()
+        machines, clients, proxies, sequencers, deptrackers, corfu_servers = read_machine_info()
     else:
-        machines, clients, proxies, sequencers, deptrackers = get_machine_info()
+        machines, clients, proxies, sequencers, deptrackers, corfu_servers = get_machine_info()
 
     setup_machines(args.whoami, args)

@@ -35,20 +35,21 @@ DEFINE_string(proxy_ip_1, "",
               "IP address for the proxy n");
 DEFINE_string(proxy_ip_2, "",
               "IP address for the proxy n");
+DEFINE_string(seq_ip, "",
+              "IP address for the sequencer");
 DEFINE_uint32(proxy_id, 0,
               "Proxy id");
 DEFINE_string(out_dir, "",
               "IP address for the proxy n");
 DEFINE_string(results_file, "",
-              "File to print results");
-DEFINE_uint64(nsequence_spaces, 0,
-              "Total number of sequence spaces");
-
-extern uint64_t nsequence_spaces;
+              "IP address for the proxy n");
+DEFINE_uint64(max_log_position, 0,
+              "Max log positino to read from, indicates read only");
+// Corfu
+DEFINE_string(corfu_ips, "",
+              "Corfu IP addresses");
 
 volatile bool force_quit = false;
-double failover_to = 1;
-
 
 struct app_stats_t;
 
@@ -57,10 +58,13 @@ class Tag;
 class ClientContext;
 
 class Tag {
-public:
+ public:
   bool msgbufs_allocated = false;
   ClientContext *c;
   Operation *op;
+
+  // Corfu stuff
+  size_t corfu_replies;
 
   erpc::MsgBuffer req_msgbuf;
   erpc::MsgBuffer resp_msgbuf;
@@ -70,21 +74,25 @@ public:
   void alloc_msgbufs(ClientContext *c, Operation *);
 };
 
-
 class Operation {
-public:
+ public:
   ReqType reqtype;
   client_reqid_t local_reqid;  // client-assigned reqid
   size_t local_idx;  // Index into ops array
   size_t cur_px_conn = 0;
   bool received_response = false;
+  uint64_t read_pos = 0;
+
+  uint64_t seqnum;
+  char entry_val[MAX_CORFU_ENTRY_SIZE];
 
   Operation(size_t i) {
     local_idx = i;
   }
 
-  void reset(client_reqid_t local_reqid) {
-    this->local_reqid = local_reqid;
+  void reset(client_reqid_t _local_reqid) {
+    local_reqid = _local_reqid;
+    seqnum = 0;
   }
 };
 
@@ -102,7 +110,7 @@ enum State {
 };
 
 class ClientContext : public ThreadContext {
-public:
+ public:
   // For stats
   struct timespec tput_t0;  // Throughput start time
   app_stats_t *app_stats;
@@ -111,7 +119,12 @@ public:
 
   uint16_t client_id;
 
-  std::vector<int> sessions;
+  std::vector<int> sessions; // proxies only, we loop around it
+  int seq_session_num;
+  // corfu session numbers
+  // vector from replica group to session nums for each replica in the group
+  std::vector<std::vector<int>> corfu_session_nums;
+  std::vector<std::string> corfu_ips;
 
   erpc::Latency latency;
 
@@ -119,15 +132,21 @@ public:
   client_reqid_t reqid_counter = 0;
 
   client_reqid_t highest_cons_reqid = -1;
-  std::priority_queue<client_reqid_t, std::vector<client_reqid_t>,
-      CmpReqIds> done_req_ids;
+  std::priority_queue<client_reqid_t, std::vector<client_reqid_t>, CmpReqIds>
+      done_req_ids;
 
   bool alive_reps[3];
 
   char *stats;
   size_t completed_slots = 0;
 
+  uint64_t max_log_position = 0;
+
   FILE *fp;
+
+  std::random_device rd;
+  std::mt19937_64 gen;
+  std::uniform_int_distribution<unsigned long long> dis;
 
   Operation *ops[MAX_CONCURRENCY];
   size_t req_tsc[MAX_CONCURRENCY];
@@ -143,23 +162,19 @@ public:
 
   void next_proxy(Operation *op) {
     size_t tmp = op->cur_px_conn;
-    // all ops follow 0. this seems to work better than individually changing
-    if (op->local_idx == 0) {
-      for (size_t i = 0; i < 3; i++) {
-        op->cur_px_conn = (op->cur_px_conn + 1) % 3;
-        // always true
-        if (this->alive_reps[op->cur_px_conn]) {
+    for (size_t i = 0; i < 3; i++) {
+      op->cur_px_conn = (op->cur_px_conn + 1) % 3;
+      if (this->alive_reps[op->cur_px_conn]) {
         debug_print(1, "[%zu] Switching from %zu to %zu, op %zu\n",
                     thread_id, tmp, op->cur_px_conn, op->local_idx);
-
-          // set all ops to be the same proxy and only change if I'm op 0
-          for (size_t j = 0; j < FLAGS_concurrency; j++) {
-            ops[j]->cur_px_conn = op->cur_px_conn;
-          }
-          return;
-        }
+        return;
       }
     }
+
+    // Will never print
+    LOG_INFO("Thread: %zu cid %d all proxies declared DEAD\n",
+             thread_id,
+             client_id);
   }
 
   ~ClientContext() {
@@ -173,33 +188,44 @@ public:
   void push_and_update_highest_cons_req_id(client_reqid_t rid) {
     done_req_ids.push(rid);
     while (!done_req_ids.empty() &&
-           (done_req_ids.top() == highest_cons_reqid + 1 ||
+        (done_req_ids.top() == highest_cons_reqid + 1 ||
             done_req_ids.top() == highest_cons_reqid)) { // handle duplicates...
       highest_cons_reqid = done_req_ids.top();
       done_req_ids.pop();
     }
   }
 
+  std::vector<int> *log_pos_to_session_num(uint64_t log_pos) {
+    return &corfu_session_nums[
+      log_pos % ((corfu_ips.size() * N_CORFUTHREADS)/kCorfuReplicationFactor)];
+  }
+
   void print_stats();
 };
 
-
 inline void
 Tag::alloc_msgbufs(ClientContext *_c, Operation *_op) {
-  this->c = _c;
-  this->op = _op;
+  c = _c;
+  op = _op;
 
-  size_t bufsize = client_payload_size( nsequence_spaces);
+  size_t bufsize = std::max(sizeof(client_payload_t), sizeof(corfu_entry_t));
 
   if (!msgbufs_allocated) {
+    LOG_INFO("Allocating msg_bufs for the first time op rid %zu size %zu\n",
+             op->local_reqid,
+             bufsize);
     req_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
     resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
     msgbufs_allocated = true;
   }
+
+  c->rpc->resize_msg_buffer(&req_msgbuf, bufsize);
+  c->rpc->resize_msg_buffer(&resp_msgbuf, bufsize);
 }
 
-
-Tag::~Tag() {}
+Tag::~Tag() {
+  LOG_INFO("Destructing Tag?\n");
+}
 
 // added for more accurate timing
 const int SEC_TIMER_US = 1000000;
@@ -266,12 +292,14 @@ class Timer {
   }
 
   bool expired() {
+    // can't expire if it wasn't running?
     if (!running) return false;
     uint64_t curr_tsc = erpc::rdtsc();
     return curr_tsc - prev_tsc > timeout_tsc;
   }
 
   bool expired_reset() {
+    // can't expire if it wasn't running?
     if (!running) return false;
     uint64_t curr_tsc = erpc::rdtsc();
     if (curr_tsc - prev_tsc > timeout_tsc) {
@@ -281,6 +309,7 @@ class Timer {
   }
 
   bool expired_stop() {
+    // can't expire if it wasn't running?
     if (!running) return false;
     uint64_t curr_tsc = erpc::rdtsc();
     if (curr_tsc - prev_tsc > timeout_tsc) {
