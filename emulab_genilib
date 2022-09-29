@@ -1,0 +1,57 @@
+"""For Mason over erpc; uses Ubuntu18"""
+# Import the Portal object.
+import geni.portal as portal
+# Import the ProtoGENI library.
+import geni.rspec.pg as pg
+# Import the Emulab specific extensions.
+import geni.rspec.emulab as emulab
+
+# Describe the parameter(s) this profile script can accept.
+portal.context.defineParameter("s", "Number of sequencers", portal.ParameterType.INTEGER, 2)
+portal.context.defineParameter("p", "Number of proxy machines", portal.ParameterType.INTEGER, 3)
+portal.context.defineParameter("c", "Number of clients", portal.ParameterType.INTEGER, 1)
+portal.context.defineParameter("cs", "Number of service servers", portal.ParameterType.INTEGER, 3)
+
+# Retrieve the values the user specifies during instantiation.
+params = portal.context.bindParameters()
+
+nclients = params.c
+nsequencers = params.s
+nproxies = params.p
+nservers = params.cs
+
+# Create a portal object,
+pc = portal.Context()
+
+# Create a Request object to start building the RSpec.
+request = pc.makeRequestRSpec()
+
+proxies = ["proxy-%d" % x for x in range(nproxies)]
+servers = ["server-%d" % x for x in range(nservers)]
+clients = ["client-%d" % x for x in range(nclients)]
+sequencers = ["sequencer-%d" % x for x in range(nsequencers)]
+nodes = [request.RawPC(node) for node in sequencers + clients + proxies + servers]
+
+for i, node in enumerate (nodes): 
+    node.hardware_type = 'd430'
+    node.disk_image = "" # place disk image URN here
+
+ifaces1 = [node.addInterface('eth1', pg.IPv4Address('10.1.1.%d' % (i + 1),'255.255.255.0'))
+            for i, node in enumerate(nodes)]
+ifaces2 = [node.addInterface('eth2', pg.IPv4Address('10.1.2.%d' % (i + 1),'255.255.255.0'))
+            for i, node in enumerate(nodes)]
+
+# Link tblink-l3
+link_tblink_l3 = request.Link('tblink-l3')
+link_tblink_l3.setNoBandwidthShaping()
+link_tblink_l3.trivial_ok = True
+link_tblink_l3.setProperties(bandwidth=10000000)
+    
+# Add nodes to link
+for iface in ifaces1 + ifaces2:
+    link_tblink_l3.addInterface(iface)
+
+request.setRoutingStyle('static')
+
+# Print the generated rspec
+pc.printRequestRSpec(request)

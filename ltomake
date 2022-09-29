@@ -1,0 +1,34 @@
+#!/bin/bash
+set -e 
+
+COMPONENT=$1
+
+if [ $COMPONENT == client ]
+then
+    SESSION_CREDITS=128
+else
+    SESSION_CREDITS=32
+fi
+
+
+SRC_DIR=`pwd`
+COMMON_DIR=`cd ../; pwd`
+LOGGER_DIR=$COMMON_DIR
+echo COMMON_DIR $COMMON_DIR LOGGER_DIR $LOGGER_DIR
+ERPC_DIR=`cd ../; pwd`/eRPC
+APPS_DIR=$ERPC_DIR/apps/$COMPONENT
+
+[ ! -d $APPS_DIR ] && mkdir $APPS_DIR
+cp ./*.cc $APPS_DIR
+cp ./*.h $APPS_DIR
+cp ../common.h $APPS_DIR
+cp ../logger.h $APPS_DIR
+cp ../bitmap.h $APPS_DIR # not needed for client
+
+cd $ERPC_DIR
+echo $COMPONENT > scripts/autorun_app_file
+
+cmake . -DPERF=ON -DTRANSPORT=dpdk -DCOMMON_DIR=$COMMON_DIR -DLOGGER_DIR=$LOGGER_DIR -DLOG_LEVEL="warn" #-DSESSION_CREDITS=$SESSION_CREDITS -DLOG_LEVEL="warn"
+make -j -I /usr/include/boost/ -lboost_serialization
+
+cp build/$COMPONENT $SRC_DIR
