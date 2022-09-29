@@ -19,7 +19,7 @@ sm_handler(int session_num, erpc::SmEventType sm_event_type,
   auto *c = static_cast<ThreadContext *>(_context);
 
   printf("Connected to session_num %d, thread_id %zu\n",
-        session_num, c->thread_id);
+         session_num, c->thread_id);
 
   erpc::rt_assert(
       sm_err_type == erpc::SmErrType::kNoError,
@@ -90,7 +90,7 @@ SeqContext::print_stats() {
     std::string line;
     for (size_t i = 0; i < sequence_spaces->nsequence_spaces; i++) {
       line += std::to_string(sequence_spaces->sequence_spaces[i])
-          + " ";// + std::to_string(seqnums[i].seqnum);
+          + " ";
     }
     line += "\n";
     LOG_INFO("%s", line.c_str());
@@ -123,15 +123,14 @@ seqnumreq_handler(erpc::ReqHandle *req_handle, void *_context) {
   debug_print(DEBUG, "Thread %d: received request from %d\n",
               payload->proxy_id, c->thread_id);
 
-  erpc::Rpc<erpc::CTransport>::resize_msg_buffer(&req_handle->pre_resp_msgbuf,
-                                                 sequencer_payload_size(
-                                                     c->sequence_spaces->nsequence_spaces));
+  erpc::Rpc<erpc::CTransport>::
+  resize_msg_buffer(&req_handle->pre_resp_msgbuf,
+                    sequencer_payload_size(
+                        c->sequence_spaces->nsequence_spaces));
 
   auto *response =
       reinterpret_cast<payload_t *>(req_handle->pre_resp_msgbuf.buf);
-  rte_memcpy(response,
-             payload,
-             req_msgbuf->get_data_size());
+  rte_memcpy(response, payload, req_msgbuf->get_data_size());
 
   // resize maps if necessary
   if (c->amo_map.size() <= payload->proxy_id) {
@@ -144,7 +143,6 @@ seqnumreq_handler(erpc::ReqHandle *req_handle, void *_context) {
   AmoMapElem *m = &c->amo_map[payload->proxy_id][payload->seq_req_id];
 
   response->retx = m->assign_numbers(c, response->seq_reqs);
-
   c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
   c->stat_resp_tx_tot++;
 }
@@ -176,8 +174,7 @@ seq_thread_func(size_t thread_id,
   c.rpc = &rpc;
 
   // make sure the pre resp msgbuf is large enough
-  c.rpc->set_pre_resp_msgbuf_size(
-      sizeof(payload_t) + 2 * FLAGS_nsequence_spaces * 8);
+  c.rpc->set_pre_resp_msgbuf_size(SEQUENCE_PAYLOAD_SIZE(FLAGS_nsequence_spaces));
 
   clock_gettime(CLOCK_REALTIME, &c.tput_t0);
   printf("Thread %lu beginning main loop...\n", thread_id);
@@ -305,7 +302,6 @@ main(int argc, char **argv) {
   // If I'm the backup, start with waiting for recovery requests
   if (FLAGS_am_backup) {
     run_recovery_loop(&nexus, FLAGS_nleaders, sequence_spaces);
-
     LOG_ERROR("Recovery complete!\n");
     fflush(stdout);
   }
@@ -317,3 +313,4 @@ main(int argc, char **argv) {
   printf("Bye...\n");
   return ret;
 }
+

@@ -39,6 +39,8 @@
 #define LOG_DEBUG_COMPACTION 0
 #define LOG_DEBUG_GC 0
 #define LOG_DEBUG_FIFO 0
+#define LOG_DEBUG_SERVER 0 // CATSKeeper Server
+#define LOG_DEBUG_CLIENT 0 // CATSKeeper Server
 
 // #define LOG_LEVEL_REORDER 4  // Too frequent to log (e.g., reordered pkts)
 // #define LOG_LEVEL_TRACE 5  // Extremely frequent (e.g., all datapath pkts)
@@ -56,8 +58,7 @@
 // If ERPC_LOG_LEVEL is not defined, default to the highest level so that
 // YouCompleteMe does not report compilation errors
 //#ifndef LOG_LEVEL
-// todo probably should rename LOG_LEVEL_* ? may need to prevent some conflicts
-#define CATS_LOG_LEVEL LOG_LEVEL_INFO //LOG_LEVEL_INFO // was info
+#define CATS_LOG_LEVEL LOG_LEVEL_INFO
 //#endif
 
 static void output_log_header(int level);
@@ -84,6 +85,7 @@ static void output_log_header(int level);
 #define LOG_WARN(...) ((void)0)
 #endif
 
+///*
 #if CATS_LOG_LEVEL >= LOG_LEVEL_INFO
 #define LOG_INFO(...)                                             \
   flockfile(LOG_DEFAULT_STREAM); \
@@ -94,11 +96,22 @@ static void output_log_header(int level);
 #else
 #define LOG_INFO(...) ((void)0)
 #endif
+//*/
+
+/*
+//output_log_header(LOG_DEFAULT_STREAM, LOG_LEVEL_INFO);
+#if CATS_LOG_LEVEL >= LOG_LEVEL_INFO
+#define LOG_INFO(...)                                             \
+  fprintf(LOG_DEFAULT_STREAM, __VA_ARGS__);                   \
+  fflush(LOG_DEFAULT_STREAM);
+#else
+#define LOG_INFO(...) ((void)0)
+#endif
+*/
 
 /***
  * Unique logging definitions
 ***/
-
 // template for adding new unigue logger condition
 /*
 #if LOG_DEBUG_XXX
@@ -233,6 +246,26 @@ fflush(logger_trace_file_or_default_stream)
 #define LOG_FIFO(...) ((void)0)
 #endif
 
+#if LOG_DEBUG_SERVER
+#define LOG_SERVER(...) \
+  fprintf(logger_trace_file_or_default_stream, \
+    "%s %s: ", get_formatted_time().c_str(), "SERVER"); \
+  fprintf(logger_trace_file_or_default_stream, __VA_ARGS__); \
+  fflush(logger_trace_file_or_default_stream)
+#else
+#define LOG_SERVER(...) ((void)0)
+#endif
+
+#if LOG_DEBUG_CLIENT
+#define LOG_CLIENT(...) \
+  fprintf(logger_trace_file_or_default_stream, \
+    "%s %s: ", get_formatted_time().c_str(), "CLIENT"); \
+  fprintf(logger_trace_file_or_default_stream, __VA_ARGS__); \
+  fflush(logger_trace_file_or_default_stream)
+#else
+#define LOG_CLIENT(...) ((void)0)
+#endif
+
 /// Return decent-precision time formatted as seconds:microseconds
 static std::string get_formatted_time() {
   struct timespec t;
@@ -251,9 +284,12 @@ static void output_log_header(FILE *stream, int level) {
 
   const char *type;
   switch (level) {
-    case LOG_LEVEL_ERROR: type = "CATS_ERROR"; break;
-    case LOG_LEVEL_WARN: type = "CATS_WARNG"; break;
-    case LOG_LEVEL_INFO: type = "CATS_INFO"; break;
+    case LOG_LEVEL_ERROR: type = "CATS_ERROR";
+      break;
+    case LOG_LEVEL_WARN: type = "CATS_WARNG";
+      break;
+    case LOG_LEVEL_INFO: type = "CATS_INFO";
+      break;
     default: type = "CATS_UNKWN";
   }
 

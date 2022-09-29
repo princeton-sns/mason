@@ -1,8 +1,6 @@
 #ifndef TIMER_H
 #define TIMER_H
 
-class Proxy; // why is this declared?
-
 class Timer {
  public:
   uint64_t timeout_us = 0;
@@ -34,6 +32,10 @@ class Timer {
   void start() {
     prev_tsc = erpc::rdtsc();
     running = true;
+  }
+
+  __inline__ void reset() {
+    start();
   }
 
   // Change the callback

@@ -55,13 +55,13 @@ sm_handler(int session_num, erpc::SmEventType sm_event_type,
 
   erpc::rt_assert(
       sm_err_type == erpc::SmErrType::kNoError ||
-      session_num ==
-      c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)] ||
-      sm_event_type == erpc::SmEventType::kDisconnected,
+          session_num ==
+              c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)] ||
+          sm_event_type == erpc::SmEventType::kDisconnected,
       "Got a SM error: " + erpc::sm_err_type_str(sm_err_type));
 
   if (!(sm_event_type == erpc::SmEventType::kConnected ||
-        sm_event_type == erpc::SmEventType::kDisconnected)) {
+      sm_event_type == erpc::SmEventType::kDisconnected)) {
     throw std::runtime_error("Unexpected SM event!");
   }
 
@@ -81,16 +81,17 @@ void print_waiting_batch(Proxy *p) {
   Batch *b = p->done_batch_map[bid];
 
   fmt_rt_assert(b->batch_size() != 0,
-      "PID: %d waiting for bid %zu with size 0?",
-      p->proxy_id, b->batch_id);
+                "PID: %d waiting for bid %zu with size 0?",
+                p->proxy_id, b->batch_id);
 
-  char line[1024]; memset(line, '\0', 1024);
+  char line[1024];
+  memset(line, '\0', 1024);
   sprintf(line, "bid %zu waiting for:", b->batch_id);
   bool found = false;
   for (auto first : b->acked_ops) {
     if (!b->acked_ops[first.first]) {
       found = true;
-      sprintf(line+strlen(line), "\n\tcid %u crid %zu",
+      sprintf(line + strlen(line), "\n\tcid %u crid %zu",
               first.first.first, first.first.second);
     }
   }
@@ -98,11 +99,12 @@ void print_waiting_batch(Proxy *p) {
   printf("hcbid+1: %s\n", line);
   fmt_rt_assert(found, "PID: %d all ops in waiting batch were acked!?\n\t"
                        "bid %d batch size %zu acked_ops size %zu",
-      p->proxy_id, b->batch_id, b->batch_size(), b->acked_ops.size());
+                p->proxy_id, b->batch_id, b->batch_size(), b->acked_ops.size());
 }
 
 // Lifted (almost) verbatim from erpc code:
 // https://github.com/erpc-io/eRPC/blob/master/apps/small_rpc_tput/small_rpc_tput.cc
+// todo add printing of raft stats (how far behind...)
 static inline void
 print_stats(void *_c) {
 #if PRINT_TIMING
@@ -116,7 +118,7 @@ print_stats(void *_c) {
   // this is packets per second not including appendentries
   double tput_mrps = c->stat_resp_tx_tot / (seconds * 1000000);
   double ae_pkts_per_sec = c->ae_pkts / (seconds * 1000000);
-  double ae_bytes_per_sec = c->ae_bytes / (seconds);// * 1000000);
+  double ae_bytes_per_sec = c->ae_bytes / (seconds);
   (void) ae_bytes_per_sec;
   (void) ae_pkts_per_sec;
   c->app_stats[c->thread_id].mrps = tput_mrps;
@@ -172,6 +174,7 @@ print_stats(void *_c) {
     accum.lat_us_999 /= FLAGS_nthreads;
     accum.lat_us_9999 /= FLAGS_nthreads;
 
+    // tmp_stat->write(accum.to_string());
     LOG_INFO("TOTAL: %s\n\n", accum.to_string().c_str());
   }
 
@@ -188,7 +191,6 @@ print_stats(void *_c) {
              proxy->proxy_id, proxy->replica_data[my_raft_id].node_id,
              raft_is_leader(proxy->raft), raft_get_current_leader(proxy->raft));
     LOG_INFO("\tmax_received_seqnums: %lu\n", proxy->max_received_seqnum);
-
 
     auto *raft_p = reinterpret_cast<raft_server_private_t *>(proxy->raft);
 
@@ -214,6 +216,7 @@ print_stats(void *_c) {
              "\n\t crdm %ld"
              "\n\t cripm %ld"
              "\n\t owh %ld"
+             //                "\n\t cops %ld"
              "\n\t dbids %ld"
              "\n\t deleted_seq_req_ids %ld"
              "\n",
@@ -224,6 +227,7 @@ print_stats(void *_c) {
              proxy->client_retx_done_map.size(),
              proxy->client_retx_in_progress_map.size(),
              proxy->ops_with_handles.size(),
+//                proxy->client_ops.size(),
              proxy->done_batch_ids.size(),
              proxy->deleted_seq_req_ids.size());
     LOG_INFO("highest_del_seq_req_id %zu\n", proxy->highest_del_seq_req_id);
@@ -293,12 +297,14 @@ send_heartbeat(void *_c) {
 
   Tag *tag = proxy->tag_pool.alloc();
   tag->alloc_msgbufs(c, batch, false);
+  c->rpc->resize_msg_buffer(&tag->req_msgbuf, 1);
 
   LOG_SEQ("[%zu] Sending heartbeat to sequencer, tag %p...\n",
           c->thread_id,
           static_cast<void *>(tag));
 
-  uint8_t session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
+  uint8_t
+      session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
 
   c->rpc->enqueue_request(session_num,
                           static_cast<uint8_t>(ReqType::kHeartbeat),
@@ -327,6 +333,7 @@ heartbeat_cont_func(void *_c, void *_tag) {
   Batch *b = tag->batch;
 
   if (tag->resp_msgbuf.get_data_size() == 0) {
+    // Failed continuation
     b->proxy->tag_pool.free(tag);
     b->proxy->batch_pool.free(b);
     return;
@@ -344,12 +351,11 @@ heartbeat_cont_func(void *_c, void *_tag) {
       "[%zu] Heartbeat cont func done!\n", c->thread_id);
 }
 
-
 inline void
 reply_not_leader(erpc::ReqHandle *req_handle,
                  uint16_t pid, uint16_t cid, client_reqid_t crid, Proxy *p) {
   p->c->rpc->resize_msg_buffer(
-      &req_handle->pre_resp_msgbuf, client_payload_size(nsequence_spaces));
+      &req_handle->pre_resp_msgbuf, client_payload_size());
 
   auto *payload = reinterpret_cast<client_payload_t *>(
       req_handle->pre_resp_msgbuf.buf);
@@ -376,6 +382,7 @@ Proxy::update_ackd_reqids(uint16_t cid, int64_t ackd_crid) {
     ClientOp *cop = nullptr;
     if (!(cop = in_client_retx_done_map(cid, i))) {
       if (!(cop = in_in_progress_map(cid, i))) {
+        // not in either map?
         continue;
       }
     }
@@ -389,8 +396,8 @@ Proxy::update_ackd_reqids(uint16_t cid, int64_t ackd_crid) {
     }
   }
 
-   LOG_COMPACTION("got ack for cid %u rid %ld, updated highest_cons_bid %zu\n",
-           cid, ackd_crid, highest_cons_batch_id);
+  LOG_COMPACTION("got ack for cid %u rid %ld, updated highest_cons_bid %zu\n",
+                 cid, ackd_crid, highest_cons_batch_id);
 
   // there could be reordering
   if (likely(ackd_crid > last_ackd_crid[cid])) {
@@ -406,32 +413,29 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
   auto *c = static_cast<WorkerContext *>(_context);
 
   const erpc::MsgBuffer *req_msgbuf = req_handle->get_req_msgbuf();
-  erpc::rt_assert(req_msgbuf->get_data_size() ==
-                  client_payload_size(
-                      nsequence_spaces),
-                  "Payload from client is the wrong size!\n");
+  fmt_rt_assert(req_msgbuf->get_data_size() >= client_payload_size(),
+                "Payload from client is the wrong size!"
+                " Is %zu need at least %zu\n", req_msgbuf->get_data_size(),
+                client_payload_size());
 
   auto *request = reinterpret_cast<client_payload_t *>(req_msgbuf->buf);
 
   fmt_rt_assert(c->in_proxies_map(request->proxy_id),
                 "I do not manage the proxy_id this client (id: %u)"
-                " sent to! proxy_sent: %d\n", request->client_id,
-                request->proxy_id);
+                " sent to! proxy_sent: %d\n",
+                request->client_id, request->proxy_id);
 
   Proxy *proxy = c->proxies[request->proxy_id];
 
-  if (unlikely(!raft_is_leader(proxy->raft)) || proxy->gaining_leadership) {
-    LOG_FAILOVER("I am not the leader (or gaining leadership) for the proxy_id "
+  if (unlikely(!raft_is_leader(proxy->raft))) {
+    // we are not the leader for this proxy_id, we should not process this request
+    LOG_FAILOVER("I am not the leader for the proxy_id "
                  "this client sent to! proxy_sent: %d\n", request->proxy_id);
     reply_not_leader(req_handle, request->proxy_id,
                      request->client_id, request->client_reqid, proxy);
     return;
   }
 
-  //  the recovery protocol. this may be part of the issue.
-  //  (I wait for dummy entry to commit and receive client requests before
-  //  it commits)
-  //  partially solved by replying not leader above
   // it always safe to act on ack'd client requests if I'm the leader
   // always update, could maintain a var that maintains last ack'd to see if need to update
   //  but we are unlikely to repeat very often due to eRPC guarantees
@@ -456,10 +460,10 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
                  op->batch->batch_id);
 
     if (op->has_handle) {
-      // shouldn't ever happen
       LOG_FAILOVER("in in progress map got a retx with an op "
                    "that already has a handle: client_id %d op %ld\n",
                    request->client_id, request->client_reqid);
+      // already have a handle, ignore
       return;
     }
 
@@ -469,6 +473,7 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
     if (op->committed) {
       op->submit_operation();
     }
+
     proxy->ops_with_handles[op->client_id][op->client_reqid] = op;
     return;
   }
@@ -488,7 +493,28 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
     proxy->client_retx_done_map[request->client_id].erase(
         request->client_reqid);
 
-    // we don't add to has_handle map sicne it will be removed in respond_to_client
+    // we don't add to has_handle map since it will be remove in respond_to_client
+    op->has_handle = true;
+    op->req_handle = req_handle;
+    op->respond_to_client();
+    return;
+  }
+
+  if (unlikely(proxy->in_client_retx_done_map(request->client_id,
+                                              request->client_reqid))) {
+    // this is a retransmit the follower (now leader) has completed
+    // put the handler into the existing op and reply
+
+    ClientOp *op =
+        proxy->client_retx_done_map[request->client_id][request->client_reqid];
+
+    fmt_rt_assert(!op->has_handle, "in done map got a retx with an op that "
+                                   "already has a handle: client_id %d op %d\n",
+                  request->client_id, request->client_reqid);
+
+    proxy->client_retx_done_map[request->client_id].erase(request->client_reqid);
+
+    // we don't add to has_handle map since it will be remove in respond_to_client
     op->has_handle = true;
     op->req_handle = req_handle;
     op->respond_to_client();
@@ -496,28 +522,26 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
   }
 
   /* If here we are the leader and haven't seen this op before.
-  * For FIFO ordering, we need to put each client request into a per-client queue
-  * ordered by client_reqid. Each time we hear back from the sequencer, we can
-  * put into a batch the next set of consecutive operations for each client.
-  */
+   * For FIFO ordering, we need to put each client request into a per-client queue
+   * ordered by client_reqid. Each time we hear back from the sequencer, we can
+   * put into a batch the next set of consecutive operations for each client.
+   */
   /* If we're the leader, we've either inherited the client_reqid history
    * from the previous leader or we've never seen anything from this
    * client before.
    */
   ClientOp *op = proxy->client_op_pool.alloc();
   op->populate(request->reqtype, request->client_id, request->client_reqid,
-               request->proxy_id, req_handle, proxy->op_counter++, proxy,
-               request->seq_reqs);
-  if (false) { //proxy->gaining_leadership) {
-    proxy->enqueue_op(op);
-  } else {
-    proxy->enqueue_or_add_to_batch(op);
-  }
+               request->proxy_id, req_handle, proxy->op_counter++, proxy, c,
+               request->zk_payload);
+  op->set_seq_reqs();
+  proxy->enqueue_or_add_to_batch(op);
 
   // add to map we need to maintain for acking requests...
   // This can be done now even if the op isn't added to a batch; it would
   // be equivalent to the batch getting delayed en route to sequencer.
-  proxy->client_retx_in_progress_map[request->client_id][request->client_reqid] = op;
+  proxy->client_retx_in_progress_map[request->client_id][request->client_reqid]
+    = op;
 
 #if PRINT_TIMING
   printf("[%s] client_op_handler [%s]\n", start.c_str(), erpc::get_formatted_time().c_str());
@@ -529,8 +553,9 @@ inline void
 Batch::populate_seqnum_request_buffer(Tag *tag) {
 #if !NO_ERPC
   c->rpc->resize_msg_buffer(
-      &tag->req_msgbuf, sequencer_payload_size(nsequence_spaces));
+      &tag->req_msgbuf, SEQUENCE_PAYLOAD_SIZE(nsequence_spaces));
   auto *payload = reinterpret_cast<payload_t *>(tag->req_msgbuf.buf);
+  memset(payload, 0, SEQUENCE_PAYLOAD_SIZE(nsequence_spaces));
 #else
   payload_t *payload = reinterpret_cast<payload_t *>(tag->req_msgbuf);
 #endif
@@ -540,9 +565,7 @@ Batch::populate_seqnum_request_buffer(Tag *tag) {
   payload->seq_req_id = seq_req_id;
   payload->retx = false;
 
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    payload->seq_reqs[i].batch_size = seq_reqs[i].batch_size;
-  }
+  copy_seq_reqs(payload->seq_reqs, seq_reqs);
 }
 
 // Contact sequencer for a batch of seqnums
@@ -569,19 +592,27 @@ Batch::request_seqnum(bool failover) {
   erpc::rt_assert(!failover || batch_size() == 0,
                   "there are client ops in a failover batch\n");
 
-  uint8_t session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
+  uint8_t
+      session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
 
   // For recovery: record batch as a potential hole before
   // sending request to the sequencer
   recovery_tag = tag;
 
-  LOG_SEQ("Requesting seq num batch_id %zu batch addr %p tag %p\n",
-          batch_id, reinterpret_cast<void *>(tag->batch),
+  LOG_SEQ("Requesting seq num batch_id %zu srid %zu batch addr %p tag %p\n",
+          batch_id,
+          seq_req_id,
+          reinterpret_cast<void *>(tag->batch),
           reinterpret_cast<void *>(tag));
+
+
+  erpc::rt_assert(tag->req_msgbuf.get_data_size()
+                      == SEQUENCE_PAYLOAD_SIZE(nsequence_spaces),
+                  "seq request payload wrong size\n");
 
   c->rpc->enqueue_request(session_num,
                           static_cast<uint8_t>(ReqType::kGetSeqNum),
-                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          &(tag->req_msgbuf), &tag->resp_msgbuf,
                           request_seqnum_cont_func,
                           reinterpret_cast<void *>(tag));
 
@@ -589,7 +620,6 @@ Batch::request_seqnum(bool failover) {
 #endif
 }
 
-// TODO: this does not contain a check if it is from the old sequencer!!!!!
 // Get the seqnum and update the proxy's max_received_seqnum. Start piggyback
 // timer in case no new requests come in.
 inline void
@@ -607,7 +637,6 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   if (tag->resp_msgbuf.get_data_size() == 0) {
     // Failed continuation! The batch will have been saved in the outstanding
     // batch map. Free tag and return.
-    // LOG_RECOVERY("Empty continuation from sequencer!\n");
     return;
   }
 
@@ -632,8 +661,6 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   if (LOG_DEBUG_SEQ) print_seqreqs(payload->seq_reqs, nsequence_spaces);
   // Make sure we got the right response...
   if (payload->batch_id != b->batch_id) {
-    // LOG_DT("Expected %zu, got %zu. Batch addr %p, tag %p\n",
-    //             b->batch_id, payload->batch_id, b, tag);
   }
 
   LOG_SEQ("Thread %lu: Got seqnums for batch_id %lu "
@@ -650,10 +677,10 @@ request_seqnum_cont_func(void *_context, void *_tag) {
                 b->batch_id, payload->batch_id, b, tag);
 
   if (unlikely(tag->failover)) {
+    erpc::rt_assert(false, "no failover yet for zookeeper, bad");
     debug_print(1, "We've failed over!\n");
-    printf(
-        "received a response for a previous srid nops (should be 0) == %zu\n",
-        tag->batch->batch_size());
+    printf("received a response for a previous srid nops (should be 0) == %zu\n",
+           tag->batch->batch_size());
     fflush(stdout);
     erpc::rt_assert(tag->batch->batch_size() == 0,
                     "failover batch size not 0 in noop batch\n");
@@ -666,7 +693,6 @@ request_seqnum_cont_func(void *_context, void *_tag) {
     copy_seq_reqs(op->seq_reqs, payload->seq_reqs);
     // all the seq_reqs should be 0 at this point in the batch before we
     // add to the batch
-    print_seqreqs(b->seq_reqs, nsequence_spaces);
     for (size_t j = 0; j < nsequence_spaces; j++) {
       erpc::rt_assert(b->seq_reqs[j].seqnum == 0,
                       "seqnum not zero in empty noop batch\n");
@@ -677,17 +703,17 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   } else if (unlikely(payload->retx)) {
     // a retx for a "future" srid
     LOG_ERROR("[%u] It's a retx, batch_id %zu, "
-                   "seq_req_id %zu!\n", proxy->proxy_id, b->batch_id, b->seq_req_id);
+              "seq_req_id %zu!\n", proxy->proxy_id, b->batch_id, b->seq_req_id);
     print_seqreqs(payload->seq_reqs, nsequence_spaces);
-    // This seqnum must be nooped; a different leader requested this!
+    // This seqnum must go to a noop; a different leader requested this!
     // We must re-request a sequence number for ops in this
     // batch. Put these ops in the current batch, replace with noops.
     for (auto op : b->batch_client_ops) {
-      proxy->add_op_to_batch(op); // change name to current_batch?
+      proxy->add_op_to_batch(op);
     }
     b->batch_client_ops.clear();
-
     ClientOp *op = proxy->client_op_pool.alloc();
+    erpc::rt_assert(false, "no noop yet for zookeeper, bad");
     op->populate(ReqType::kNoop, UINT16_MAX, INT64_MAX,
                  proxy->proxy_id, nullptr, proxy->op_counter++, proxy);
 
@@ -696,7 +722,6 @@ request_seqnum_cont_func(void *_context, void *_tag) {
     copy_seq_reqs(op->seq_reqs, payload->seq_reqs);
     // all the seq_reqs should be 0 at this point in the batch before we
     // add to the batch
-    // empty seq_reqs after adding the client which will receive the noops
     for (size_t j = 0; j < nsequence_spaces; j++) {
       b->seq_reqs[j].seqnum = 0;
       b->seq_reqs[j].batch_size = 0;
@@ -718,7 +743,7 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   }
 #endif
 
-  // we replicate noop batches
+  // we replicate even noop batches
   process_received_seqnums(b, payload->seq_reqs);
 
   b->proxy->tag_pool.free(tag);
@@ -728,6 +753,7 @@ request_seqnum_cont_func(void *_context, void *_tag) {
 #endif
 }
 
+// todo remove arg seqnum
 inline void
 process_received_seqnums(Batch *b, seq_req_t seq_reqs[]) {
   // if noops now both the batch and the cli op have it
@@ -737,7 +763,7 @@ process_received_seqnums(Batch *b, seq_req_t seq_reqs[]) {
 
   // This has to be done after the call to replicate. We want to make sure
   // that if this next batch of ops is sequenced and persisted, then the
-  // ones before have also been sequenced (and persisted).
+  // ones before have also been sequenced and persisted.
   b->proxy->release_queued_ops();
 }
 
@@ -786,14 +812,12 @@ Proxy::enqueue_or_add_to_batch(ClientOp *op) {
   }
 }
 
-
 /* Push op onto client-specific queue to be sequenced later.
  */
 inline void
 Proxy::enqueue_op(ClientOp *op) {
   op_queues[op->client_id].push(op);
 }
-
 
 /* Check each client's queued ops against the highest client_reqid.
  * If the queued op's ID is equal to the icreqid, put it into the current batch;
@@ -820,22 +844,28 @@ Proxy::release_queued_ops() {
 // Record sequence numbers received from the sequencer
 inline void
 Batch::record_ms_seqnums() {
+  LOG_RAFT("[%zu] Recording seqnums\n", proxy->c->thread_id);
   for (auto op : batch_client_ops) {
+    LOG_RAFT("[%zu] op->seqreqs\n", proxy->c->thread_id);
     for (size_t i = 0; i < nsequence_spaces; i++) {
-      uint64_t cur_seqnum =
-          op->seq_reqs[i].seqnum - op->seq_reqs[i].batch_size + 1;
+      if (op->seq_reqs[i].batch_size == 0) continue;
+
+      uint64_t
+          cur_seqnum = op->seq_reqs[i].seqnum - op->seq_reqs[i].batch_size + 1;
+      // only insert if we didn't already truncate.
+      // this can happen on followers if they receive notification
+      // they can truncate (and do so) before applying the seqnum
       while (cur_seqnum <= op->seq_reqs[i].seqnum) {
-        // only insert if we didn't already truncate.
-        // this can happen on followers if they receive notification
-        // they can truncate (and do so) before applying the seqnum
+        LOG_RAFT("[%zu] About to insert ss %zu sn %zu\n",
+                 proxy->c->thread_id, i, cur_seqnum);
         if (cur_seqnum >= c->received_ms_seqnums[i]->base_seqnum)
           c->received_ms_seqnums[i]->insert_seqnum(cur_seqnum);
         cur_seqnum++;
       }
     }
   }
+  LOG_RAFT("[%zu] Done Recording seqnums\n", proxy->c->thread_id);
 }
-
 
 inline void
 Batch::assign_seqnums_to_ops_ms_test() {
@@ -847,30 +877,35 @@ Batch::assign_seqnums_to_ops_ms_test() {
 
   for (auto op : batch_client_ops) {
     // noops already have there reqs and batch sizes assigned
-    // todo maybe better to do outside of this function?
     if (op->reqtype == ReqType::kNoop) {
       fmt_rt_assert(batch_client_ops.size() == 1,
                     "not only 1 client ops in noop batch %zu\n",
                     batch_client_ops.size());
       return;
     }
+    if (op->reqtype == ReqType::kNoop) {
+      fmt_rt_assert(batch_client_ops.size() == 1,
+                    "not only 1 client ops in noop batch %zu\n",
+                    batch_client_ops.size());
+    }
 
     for (size_t i = 0; i < nsequence_spaces; i++) {
+      // todo batch size determined by client op
+      if (op->seq_reqs[i].batch_size == 0) continue;
+
       current_seq_reqs[i].seqnum += op->seq_reqs[i].batch_size;
       op->seq_reqs[i].seqnum = current_seq_reqs[i].seqnum;
       fmt_rt_assert(current_seq_reqs[i].seqnum <= seq_reqs[i].seqnum,
-                    "assign_seqnums_to_ops assigned more seqnums "
-                    "than we were allocated! "
+                    "assign_seqnums_to_ops assigned more seqnums than we were allocated! "
                     "assigned %zu allocated %zu",
-                    current_seq_reqs[i].seqnum, seq_reqs[i].seqnum);
+                    current_seq_reqs[i].seqnum,
+                    seq_reqs[i].seqnum);
 
-      LOG_SEQ(
-          "Assigned bid %zu op %zu, client %u seqnum %zu for seq space %zu\n",
-          batch_id, op->client_reqid, op->client_id, current_seq_reqs[i].seqnum,
-          i);
     }
+    LOG_SEQ("Assigning batch_id %lu op %lu client %d with seqnum %lu\n",
+            this->batch_id, op->client_reqid, op->client_id, current_seqnum);
 
-    LOG_FIFO("highest_sequenced_crid %ld, client_reqid %zu\n",
+    LOG_FIFO("highest_sequenced_crid %ld, client_reqid %zu\n",//, sn %zu\n",
              proxy->highest_sequenced_crid[op->client_id],
              op->client_reqid);
 
@@ -897,16 +932,12 @@ Batch::replicate(EntryType type) {
   entry->batch_id = batch_id;
   entry->batch_size = batch_client_ops.size();
 
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    entry->base_seqnums[i] = c->received_ms_seqnums[i]->base_seqnum;
-  }
-
   auto *cmdata = entry->cmdata_buf;
   for (size_t i = 0; i < batch_client_ops.size(); i++) {
     cmdata[i].reqtype = batch_client_ops[i]->reqtype;
     cmdata[i].client_id = batch_client_ops[i]->client_id;
     cmdata[i].client_reqid = batch_client_ops[i]->client_reqid;
-
+    cmdata[i].zk_payload = batch_client_ops[i]->zk_payload;
     copy_seq_reqs(cmdata[i].seq_reqs, batch_client_ops[i]->seq_reqs);
   }
 
@@ -937,7 +968,7 @@ Proxy::replicate_recovery() {
 #endif
 
   LOG_RECOVERY("[%zu] Proxy %d in replicate recovery.\n",
-                c->thread_id, proxy_id);
+               c->thread_id, proxy_id);
 
   entry_t *entry;
   size_t n = 0;
@@ -956,7 +987,8 @@ Proxy::replicate_recovery() {
   raft_entry.type = RAFT_LOGTYPE_NORMAL;
   raft_entry.data.buf = entry;
   raft_entry.data.len = ENTRY_SIZE(n);
-  raft_entry.id = my_raft_id;
+  raft_entry.id =
+      my_raft_id;
 
   // submit the entry for replication
   raft_recv_entry(raft, &raft_entry, &dummy_entry_response);
@@ -965,7 +997,6 @@ Proxy::replicate_recovery() {
   printf("[%s] replicate [%s]\n", start.c_str(), erpc::get_formatted_time().c_str());
 #endif
 }
-
 
 // Replicate sequence number among Raft peers
 inline void
@@ -978,9 +1009,9 @@ inline void
 Batch::submit_batch_to_system() {
   for (auto op : batch_client_ops) {
     static int i = 0;
-    LOG_RAFT("[%zu] Submitting op with type %u to system\n",
+    LOG_RAFT("[%zu] Submitting op with type %d to system\n",
              c->thread_id, static_cast<uint8_t>(op->reqtype));
-    if (op->reqtype == ReqType::kNoop) {
+    if (op->reqtype == ReqType::kNoop) { // todo figure out noop
       erpc::rt_assert(i == 0,
                       "got a noop where the first op was not noop\n");
       // one of the ops in the batch is a kNoop, they all should be
@@ -995,14 +1026,616 @@ Batch::submit_batch_to_system() {
   }
 }
 
+/***** Begin CATSKeeper's service stub functions *****/
 
-// Dummy implementation: just call continuations for each operation in batch,
-// see other branches for actual service implementations
-/*** This is where Mason gives the operations to the service-defined stub ***/
+// this would make assigning seqnums easier
+// but I don't know what seq_reqs are used for later
+// metadata * in tag would be useful
+inline uint64_t consume_seqnum(seq_req_t *seq_req) {
+  erpc::rt_assert(seq_req->batch_size > 0, "consuming with batch size 0");
+  uint64_t seqnum = seq_req->seqnum - seq_req->batch_size + 1;
+  seq_req->batch_size--;
+  return seqnum;
+}
+
+/* This is a service stub function. */
+// should include a "done" function to call when all responses received
+// tag should include some metadata in order to respond to clients
+// or execute further rpcs
+void one_shot_cont_func(void *, void *_t) {
+  auto *tag = reinterpret_cast<Tag *>(_t);
+
+  // replies is a struct that has one element per "shard" request
+  // one physical shard may be multiple elements if it has > 1 request
+  auto &replies = *(tag->replies);
+  replies[tag->my_shard_idx]++;
+
+  // check if have quorum from all, if so can return to client
+  if (!*tag->returned_to_client) {
+    bool got_quorum = true;
+    // if we received a quorum from each shard
+    for (size_t shard_reps : replies) {
+      if (shard_reps < 2)
+        got_quorum = false;
+    }
+    // can return to client
+    if (got_quorum) {
+      if (tag->resp_msgbuf.get_data_size() == sizeof(zk_payload_t)) {
+        tag->op->zk_payload =
+            *reinterpret_cast<zk_payload_t *>(tag->resp_msgbuf.buf);
+      }
+      submit_operation_cont_func(nullptr, reinterpret_cast<void *>(tag->op));
+      *tag->returned_to_client = true;
+    }
+  }
+
+  // if we received a response from each shard we can delete things
+  for (size_t reps : replies) {
+    if (reps != kZKReplicationFactor) {
+      tag->op->proxy->tag_pool.free(tag);
+      return;
+    }
+  }
+
+  delete tag->replies;
+  delete tag->returned_to_client;
+  if (tag->seq_reqs) { // not used by every rpc
+    delete[] tag->seq_reqs;
+  }
+  tag->op->proxy->tag_pool.free(tag);
+}
+
+// this seems to be the same as create_node_cont_func?
+// and seems very similar to other _cont_funcs, maybe can make a more general
+// function
+void read_node_cont_func(void *, void *_t) {
+  auto *tag = reinterpret_cast<Tag *>(_t);
+
+  auto &replies = *(tag->replies);
+  replies[tag->my_shard_idx]++;
+  erpc::rt_assert(replies.size() == 1, "Not 1 shard for write request?");
+  // check if have quorum from all, if so can return to client
+  if (!*tag->returned_to_client) {
+    bool got_quorum = true;
+    // loop through each shard in replies, if any are < 2 got_quorum is false
+    for (size_t shard_reps : replies) {
+      if (shard_reps < 2)
+        got_quorum = false;
+    }
+    if (got_quorum) {
+      tag->op->zk_payload.read_node.version =
+          *reinterpret_cast<int32_t *>(tag->resp_msgbuf.buf);
+      memcpy(tag->op->zk_payload.read_node.data,
+             tag->resp_msgbuf.buf + sizeof(int32_t), MAX_ZNODE_DATA);
+      submit_operation_cont_func(nullptr, reinterpret_cast<void *>(tag->op));
+      *tag->returned_to_client = true;
+    }
+  }
+
+  // check each shard and then reply to client or whatever if response from each
+  for (size_t reps : replies) {
+    if (reps != kZKReplicationFactor) {
+      tag->op->proxy->tag_pool.free(tag);
+      return;
+    }
+  }
+  delete tag->replies;
+  delete tag->returned_to_client;
+  tag->op->proxy->tag_pool.free(tag);
+}
+
+void exists_cont_func(void *, void *_t) {
+  auto *tag = reinterpret_cast<Tag *>(_t);
+
+  auto &replies = *(tag->replies);
+  replies[tag->my_shard_idx]++;
+  erpc::rt_assert(replies.size() == 1, "Not 1 shard for write request?");
+  // check if have quorum from all, if so can return to client
+  if (!*tag->returned_to_client) {
+    bool got_quorum = true;
+    // loop through each shard in replies, if any are < 2 got_quorum is false
+    for (size_t shard_reps : replies) {
+      if (shard_reps < 2)
+        got_quorum = false;
+    }
+    if (got_quorum) {
+      tag->op->zk_payload.exists =
+          *reinterpret_cast<exists_t *>(tag->resp_msgbuf.buf);
+      submit_operation_cont_func(nullptr, reinterpret_cast<void *>(tag->op));
+      *tag->returned_to_client = true;
+    }
+  }
+
+  // check each shard and then reply to client or whatever if response from each
+  for (size_t reps : replies) {
+    if (reps != kZKReplicationFactor) {
+      tag->op->proxy->tag_pool.free(tag);
+      return;
+    }
+  }
+  delete tag->replies;
+  delete tag->returned_to_client;
+  tag->op->proxy->tag_pool.free(tag);
+}
+
+void get_children_cont_func(void *, void *_t) {
+  auto *tag = reinterpret_cast<Tag *>(_t);
+  auto &replies = *(tag->replies);
+  replies[tag->my_shard_idx]++;
+  erpc::rt_assert(replies.size() == 1, "Not 1 shard for write request?");
+  // check if have quorum from all, if so can return to client
+  if (!*tag->returned_to_client) {
+    bool got_quorum = true;
+    // loop through each shard in replies, if any are < 2 got_quorum is false
+    for (size_t shard_reps : replies) {
+      if (shard_reps < 2)
+        got_quorum = false;
+    }
+    if (got_quorum) {
+      uint64_t data_size = tag->resp_msgbuf.get_data_size();
+      tag->op->grow_to_accommodate(data_size);
+
+      memcpy(tag->op->op_buf, tag->resp_msgbuf.buf, data_size);
+      submit_operation_cont_func(nullptr, reinterpret_cast<void *>(tag->op));
+      *tag->returned_to_client = true;
+    }
+  }
+
+  // check each shard and then reply to client or whatever if response from each
+  for (size_t reps : replies) {
+    if (reps != kZKReplicationFactor) {
+      tag->op->proxy->tag_pool.free(tag);
+      return;
+    }
+  }
+  delete tag->replies;
+  delete tag->returned_to_client;
+  tag->op->proxy->tag_pool.free(tag);
+}
+
+void send_unseq_req_to_shard(Proxy *p,
+                             size_t shard, size_t shard_idx,
+                             OpType op_type,
+                             std::vector<size_t> *replies,
+                             bool *returned_to_client,
+                             seq_req_t *seq_reqs,
+                             void *buf, // does not accept nullptr
+                             size_t buf_size,
+                             erpc::erpc_cont_func_t cont_func,
+                             erpc::ReqHandle *req_handle) {
+  // for each node in the shard
+  for (size_t i = 0; i < kZKReplicationFactor; i++) {
+    Tag *tag = p->tag_pool.alloc();
+    tag->alloc_msgbufs(p->c);
+    p->c->rpc->resize_msg_buffer(&tag->req_msgbuf, buf_size);
+    tag->my_shard_idx = shard_idx;
+    tag->replies = replies;
+    tag->returned_to_client = returned_to_client;
+    tag->seq_reqs = seq_reqs;
+    tag->req_handle = req_handle;
+
+    memcpy(tag->req_msgbuf.buf, buf, buf_size);
+
+    int session_num = p->c->zk_session_nums[shard][i];
+    // to handle zk failures we just don't send if not connected?
+    erpc::rt_assert(p->c->rpc->is_connected(session_num),
+                    "not connected to zk server trying to send to\n");
+    p->c->rpc->enqueue_request(session_num, op_type, &tag->req_msgbuf,
+                            &tag->resp_msgbuf, cont_func, tag);
+  }
+}
+
+// todo put replies/ returned_to_client into some md pointer...
+//  this was in design for app interface
+void send_req_to_shard(ClientOp *op, size_t shard, size_t shard_idx,
+                       OpType op_type, std::vector<size_t> *replies,
+                       bool *returned_to_client, seq_req_t *seq_reqs, void *buf,
+                       size_t buf_size, erpc::erpc_cont_func_t cont_func) {
+  auto *c = op->c;
+  // for each node in the shard
+  for (size_t i = 0; i < kZKReplicationFactor; i++) {
+    Tag *tag = op->proxy->tag_pool.alloc();
+    tag->alloc_msgbufs(c);
+    c->rpc->resize_msg_buffer(&tag->req_msgbuf, buf_size);
+    tag->my_shard_idx = shard_idx;
+    tag->replies = replies;
+    tag->returned_to_client = returned_to_client;
+    tag->op = op;
+    tag->seq_reqs = seq_reqs;
+
+    memcpy(tag->req_msgbuf.buf, buf, buf_size);
+
+    int session_num = c->zk_session_nums[shard][i];
+    // to handle zk failures we just don't send if not connected?
+    erpc::rt_assert(c->rpc->is_connected(session_num),
+                    "not connected to zk server trying to send to\n");
+    c->rpc->enqueue_request(session_num, op_type, &tag->req_msgbuf,
+                            &tag->resp_msgbuf, cont_func, tag);
+  }
+}
+
+inline void
+client_heartbeat_cont_func(void *, void *_t) {
+  auto *tag = reinterpret_cast<Tag *>(_t);
+  // replies is a struct that has one element per "shard" request
+  // one physical shard may be multiple elements if it has > 1 request
+  auto &replies = *(tag->replies);
+  replies[tag->my_shard_idx]++;
+
+  client_heartbeat_resp_t *chresp = reinterpret_cast<client_heartbeat_resp_t *>(
+      tag->resp_msgbuf.buf);
+
+  // check if have quorum from all, if so can return to client
+  if (!*tag->returned_to_client) {
+    bool got_quorum = true;
+    // if we received a quorum from each shard
+    for (size_t shard_reps : replies) {
+      if (shard_reps < 2)
+        got_quorum = false;
+    }
+    // can return to client if we have quorum from every shard or if we heard
+    // from a server that already deleted it. any sequenced op will see delete.
+    if (got_quorum || chresp->deleted) {
+      tag->c->rpc->resize_msg_buffer(&tag->req_handle->pre_resp_msgbuf, sizeof(chresp));
+      *reinterpret_cast<client_heartbeat_resp_t *>(
+          tag->req_handle->pre_resp_msgbuf.buf) = *chresp;
+      tag->c->rpc->enqueue_response(tag->req_handle,
+                                    &tag->req_handle->pre_resp_msgbuf);
+
+      *tag->returned_to_client = true;
+    }
+  }
+
+  // if we received a response from each shard we can delete things
+  for (size_t reps : replies) {
+    if (reps != kZKReplicationFactor) {
+      // we always free this tag
+      tag->c->proxies.begin()->second->tag_pool.free(tag);
+      return;
+    }
+  }
+
+  delete tag->replies;
+  delete tag->returned_to_client;
+  if (tag->seq_reqs) { // not used by every rpc
+    delete[] tag->seq_reqs;
+  }
+  tag->c->proxies.begin()->second->tag_pool.free(tag);
+}
+
+inline void
+client_heartbeat_handler(erpc::ReqHandle *req_handle, void *_context) {
+  auto *c = static_cast<WorkerContext *>(_context);
+  auto *client_heartbeat = reinterpret_cast<client_heartbeat_t *>(
+      req_handle->get_req_msgbuf()->buf);
+  Proxy *p = c->proxies[client_heartbeat->proxy_id];
+
+  //setup metadata
+  auto *replies = new std::vector<size_t>;
+  replies->resize(client_heartbeat->nshards);
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+
+  // setup request
+  client_heartbeat_req_t chr;
+  chr.client_id = client_heartbeat->client_id;
+  chr.client_connection_number = client_heartbeat->client_connection_number;
+
+  for (uint32_t i = 0; i < client_heartbeat->nshards; i++) {
+    send_unseq_req_to_shard(p, client_heartbeat->shards[i], i,
+                      OpType::kClientHeartbeat, replies, returned_to_client,
+                      nullptr, &chr, sizeof(chr), client_heartbeat_cont_func,
+                      req_handle);
+  }
+}
+
+// One shot
+// right now. recursive creation is not supported. but it is also not checked.
+// clients need to submit create_node for each parent dir it is unsure exists?
+// there can be a flag that says "no data" to not modify data
+//
+void submit_create_node(ClientOp *op) {
+  auto *c = op->c;
+  create_node_t create_node;
+  create_node = op->zk_payload.create_node;
+  create_node.not_owner = false;
+  // create root only goes to one shard.
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  if (std::string(create_node.name) == std::string("/")) {
+    replies->resize(1);
+  } else if (create_node.options == CreateNodeOptions::kEphemeral) {
+    replies->resize(2 + static_cast<size_t>(create_node.nshards));
+  } else {
+    replies->resize(2);
+  }
+  auto shard = c->znode_to_shard_idx(create_node.name);
+  create_node.version = 0;
+  create_node.seqnum = consume_seqnum(&op->seq_reqs[shard]);
+
+  send_req_to_shard(op, shard, 0, OpType::kCreateNode, replies,
+                    returned_to_client, nullptr, &create_node,
+                    sizeof(create_node), one_shot_cont_func);
+
+  // this is because we need to notify the ephemeral nodes of the shards
+  if (create_node.options == CreateNodeOptions::kEphemeral) {
+    for (size_t i = 0; i < create_node.nshards; i++) {
+      create_node.seqnum = consume_seqnum(&op->seq_reqs[create_node.shards[i]]);
+      create_node.not_owner = true;
+      send_req_to_shard(op, create_node.shards[i], 2 + i, OpType::kCreateNode, replies,
+                        returned_to_client, nullptr, &create_node,
+                        sizeof(create_node), one_shot_cont_func);
+    }
+  }
+
+  if (std::string(create_node.name) != std::string("/")) {
+    erpc::rt_assert(replies->size() == 2 ||
+                    create_node.options == CreateNodeOptions::kEphemeral,
+                    "Shards size should be 2 for not root.\n");
+    // then send the add_child to it's parent
+    add_child_t add_child;
+    std::string parent(get_parent(create_node.name));
+    auto ad_shard = c->znode_to_shard_idx(parent);
+
+    strcpy(add_child.name, parent.c_str());
+    strcpy(add_child.child, create_node.name);
+    // it's possible they go to the same shard...
+    add_child.seqnum = consume_seqnum(&op->seq_reqs[ad_shard]);
+    send_req_to_shard(op, ad_shard, 1, OpType::kAddChild, replies,
+                      returned_to_client, nullptr, &add_child,
+                      sizeof(add_child), one_shot_cont_func);
+  }
+}
+
+// One shot
+// delete a client connection
+void submit_delete_client_connection(ClientOp *op) {
+  delete_client_connection dcc = op->zk_payload.delete_client_connection;
+  auto *replies = new std::vector<size_t>;
+  replies->resize(dcc.nshards); // todo should be the shards that have an eph node
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  for (size_t i = 0; i < dcc.nshards; i++) {
+    uint8_t shard = dcc.shards[i];
+    dcc.seqnum = consume_seqnum(&op->seq_reqs[shard]);
+    send_req_to_shard(op, shard, i, OpType::kDeleteClientConnection, replies,
+                      returned_to_client, nullptr, &dcc,
+                      sizeof(delete_client_connection), one_shot_cont_func);
+  }
+}
+
+// One shot
+void submit_write_node(ClientOp *op) {
+  // create_node needs to send a create_node() request to the shard for this node
+  // and an add_child() operation to its parent
+  auto *c = op->c;
+  write_node_t write_node = op->zk_payload.write_node;
+  // actual write node request
+
+  // write only goes to one shard.
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  replies->resize(1);
+  auto shard = c->znode_to_shard_idx(write_node.name);
+  write_node.seqnum = op->seq_reqs[shard].seqnum;
+
+  send_req_to_shard(op, shard, 0, OpType::kWriteNode, replies,
+                    returned_to_client, nullptr, &write_node,
+                    sizeof(write_node), one_shot_cont_func);//write_node_cont_func);
+}
+
+void submit_read_node(ClientOp *op) {
+  // create_node needs to send a create_node() request to the shard for this node
+  // and an add_child() operation to its parent
+  auto *c = op->c;
+  read_node_t read_node = op->zk_payload.read_node;
+  // actual write node request
+
+  // write only goes to one shard.
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  replies->resize(1);
+  auto shard = c->znode_to_shard_idx(read_node.name);
+  read_node.seqnum = op->seq_reqs[shard].seqnum;
+
+  send_req_to_shard(op, shard, 0, OpType::kReadNode, replies,
+                    returned_to_client, nullptr, &read_node,
+                    sizeof(read_node), read_node_cont_func);
+}
+
+void submit_exists(ClientOp *op) {
+  // create_node needs to send a create_node() request to the shard for this node
+  // and an add_child() operation to its parent
+  auto *c = op->c;
+  exists_t exists = op->zk_payload.exists;
+
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  replies->resize(1);
+  auto shard = c->znode_to_shard_idx(exists.name);
+  exists.seqnum = op->seq_reqs[shard].seqnum;
+
+  send_req_to_shard(op, shard, 0, OpType::kExists, replies,
+                    returned_to_client, nullptr, &exists,
+                    sizeof(exists), exists_cont_func);
+}
+
+void submit_get_children(ClientOp *op) {
+  auto *c = op->c;
+  get_children_t get_children = op->zk_payload.get_children;
+
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  replies->resize(1);
+  auto shard = c->znode_to_shard_idx(get_children.name);
+  get_children.seqnum = op->seq_reqs[shard].seqnum;
+
+  send_req_to_shard(op, shard, 0, OpType::kGetChildren, replies,
+                    returned_to_client, nullptr, &get_children,
+                    sizeof(get_children), get_children_cont_func);
+}
+
+// data is the data we received during the delete round.
+void submit_create_and_rename_child(ClientOp *op,
+                                    uint8_t *data,
+                                    seq_req_t *seq_reqs) {
+  // send the create node to the name's node
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  replies->resize(2); // two shards for this round
+
+  create_node_t create_node;
+  strcpy(create_node.name, op->zk_payload.rename_node.to);
+  create_node.is_rename = true;
+  create_node.version = *reinterpret_cast<int32_t *>(data);
+  memcpy(create_node.data, data+sizeof(int32_t), MAX_ZNODE_DATA);
+  create_node.options = CreateNodeOptions::kPersistent;
+  create_node.not_owner = false;
+  auto cshard = op->c->znode_to_shard_idx(create_node.name);
+  create_node.seqnum = consume_seqnum(&seq_reqs[cshard]);
+
+  send_req_to_shard(op, cshard, 0, OpType::kCreateNode, replies,
+                    returned_to_client, seq_reqs, &create_node,
+                    sizeof(create_node), one_shot_cont_func);//create_and_rename_child_cont_func);
+
+  rename_child_t rename_child;
+  auto rshard =
+      op->c->znode_to_shard_idx(get_parent(op->zk_payload.rename_node.from));
+
+  rename_child.seqnum = consume_seqnum(&seq_reqs[rshard]);
+
+  strcpy(rename_child.from, op->zk_payload.rename_node.from);
+  strcpy(rename_child.to, op->zk_payload.rename_node.to);
+
+  send_req_to_shard(op, rshard, 1, OpType::kRenameChild, replies,
+                    returned_to_client, seq_reqs, &rename_child,
+                    sizeof(rename_child), one_shot_cont_func);//create_and_rename_child_cont_func);
+
+}
+
+// delete seems to be working
+// need to now send the create and rename child
+void delete_and_rename_node_cont_func(void *, void *_t) {
+  auto *tag = reinterpret_cast<Tag *>(_t);
+  auto &replies = *(tag->replies);
+  replies[tag->my_shard_idx]++;
+
+  // check if have quorum from all, if so can return to client
+  // not actually "returned to client"
+  // actually "done round 1"
+  if (!*tag->returned_to_client) {
+    // make function
+    bool got_quorum = true;
+    for (size_t shard_reps : replies) {
+      if (shard_reps < 2)
+        got_quorum = false;
+    }
+    if (got_quorum) {
+      fmt_rt_assert(tag->resp_msgbuf.get_data_size() ==
+                    MAX_ZNODE_DATA + sizeof(int32_t),
+                    "delete reply not right size got %zu wanted %zu\n",
+                    tag->resp_msgbuf.get_data_size(),
+                    MAX_ZNODE_DATA + sizeof(int32_t));
+      submit_create_and_rename_child(tag->op, tag->resp_msgbuf.buf,
+                                     tag->seq_reqs);
+      *tag->returned_to_client = true;
+    }
+  }
+
+  // if response from everyone can delete replies and "returned to client
+  // returned to client here means went to second round...
+  // todo this is what metadata is for.
+  // check each shard and then reply to client or whatever if response from each
+  for (size_t reps : replies) {
+    if (reps != kZKReplicationFactor) {
+      // free this tag
+      tag->op->proxy->tag_pool.free(tag);
+      return;
+    }
+  }
+  delete tag->replies;
+  delete tag->returned_to_client;
+  tag->op->proxy->tag_pool.free(tag);
+}
+
+void submit_rename_node(ClientOp *op) {
+  // first send the delete node
+  delete_node_t delete_node;
+  strcpy(delete_node.name, op->zk_payload.rename_node.from);
+
+  auto *replies = new std::vector<size_t>;
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+  auto *seq_reqs = new seq_req_t[nsequence_spaces];
+  copy_seq_reqs(seq_reqs, op->seq_reqs);
+
+  replies->resize(1);
+  auto shard = op->c->znode_to_shard_idx(delete_node.name);
+  delete_node.seqnum =
+      consume_seqnum(&seq_reqs[shard]);
+
+  send_req_to_shard(op, shard, 0, OpType::kDeleteAndReadNode, replies,
+                    returned_to_client, seq_reqs, &delete_node,
+                    sizeof(delete_node), delete_and_rename_node_cont_func);
+}
+
+void submit_delete_node(ClientOp *op) {
+  auto *replies = new std::vector<size_t>;
+  replies->resize(2);
+
+  auto *returned_to_client = new bool;
+  *returned_to_client = false;
+
+  // delete the node
+  delete_node_t delete_node;
+  strcpy(delete_node.name, op->zk_payload.delete_node.name);
+  auto shard = op->c->znode_to_shard_idx(delete_node.name);
+  delete_node.seqnum = consume_seqnum(&(op->seq_reqs[shard]));
+  send_req_to_shard(op, shard, 0, OpType::kDeleteNode, replies,
+                    returned_to_client, nullptr, &delete_node,
+                    sizeof(delete_node), one_shot_cont_func);
+
+  // remove the child from the parent
+  remove_child_t remove_child;
+  strcpy(remove_child.name,
+         get_parent(op->zk_payload.delete_node.name).c_str());
+  strcpy(remove_child.child, op->zk_payload.delete_node.name);
+  auto rc_shard = op->c->znode_to_shard_idx(remove_child.name);
+  remove_child.seqnum = consume_seqnum(&(op->seq_reqs[rc_shard]));
+  send_req_to_shard(op, rc_shard, 1, OpType::kRemoveChild, replies,
+                    returned_to_client, nullptr, &remove_child,
+                    sizeof(remove_child), one_shot_cont_func);
+}
+
+/***** End CATSKeeper's service stub functions *****/
+
+// Currently a dummy implementation: just call continuations
+// for each operation in batch
+/* This is where Mason would hand the sequenced operation to the service stub. */
 inline void
 ClientOp::submit_operation(void) {
-  LOG_RAFT("[%zu] in submit_operation_cont_func\n", proxy->c->thread_id);
-  submit_operation_cont_func(nullptr, reinterpret_cast<void *>(this));
+  switch (reqtype) {
+    case ReqType::kCreateZNode: { submit_create_node(this); break; }
+    case ReqType::kRenameZNode: { submit_rename_node(this); break; }
+    case ReqType::kDeleteZNode: { submit_delete_node(this); break; }
+    case ReqType::kWriteZNode:  { submit_write_node(this); break; }
+    case ReqType::kReadZNode:   { submit_read_node(this); break; }
+    case ReqType::kExists:      { submit_exists(this); break; }
+    case ReqType::kGetChildren: { submit_get_children(this); break; }
+    case ReqType::kDeleteClientConnection: {
+      submit_delete_client_connection(this); break; }
+    default: {
+      fmt_rt_assert(false, "Unknown client operation"
+                             "got %u\n", reqtype);
+      break;
+    }
+  }
 }
 
 void Proxy::complete_and_send_current_batch(void) {
@@ -1033,6 +1666,7 @@ batch_to_cb(void *_proxy) {
 
   // Do nothing if the batch hasn't received any requests; else,
   // process batch.
+
   if (proxy->current_batch->batch_size() != 0) {
     LOG_TIMERS("Thread %lu: Batch %p expired with size %d!\n",
                proxy->c->thread_id,
@@ -1059,7 +1693,6 @@ batch_to_cb(void *_proxy) {
 #endif
 }
 
-
 // Respond to client
 inline void
 submit_operation_cont_func(void *_context, void *_tag) {
@@ -1075,9 +1708,6 @@ submit_operation_cont_func(void *_context, void *_tag) {
   // this is called immediately checking if I'm the leader in applylog right now
   //   so this should never execute
   if (!raft_is_leader(proxy->raft)) {
-    fmt_rt_assert(false,
-                  "Proxy ID: %d is not the leader in submit op cont func!\n",
-                  proxy->proxy_id);
     // I am no longer the leader for a seqnum that I requested, don't do anything
     return;
   }
@@ -1085,21 +1715,54 @@ submit_operation_cont_func(void *_context, void *_tag) {
   op->respond_to_client();
 }
 
-
 // Respond to the client
-inline void
+inline erpc::MsgBuffer *
 ClientOp::populate_client_response() {
-  proxy->c->rpc->resize_msg_buffer(
-      &req_handle->pre_resp_msgbuf, client_payload_size(nsequence_spaces));
-
-  auto *payload = reinterpret_cast<client_payload_t *>(
-      req_handle->pre_resp_msgbuf.buf);
+  client_payload_t *payload = nullptr;
+  erpc::MsgBuffer *ret_msgbuf = nullptr;
+  if (reqtype != ReqType::kGetChildren) {
+    proxy->c->rpc->resize_msg_buffer(
+        &req_handle->pre_resp_msgbuf, client_payload_size());
+    payload = reinterpret_cast<client_payload_t *>(
+        req_handle->pre_resp_msgbuf.buf);
+    ret_msgbuf = &req_handle->pre_resp_msgbuf;
+  } else {
+    // op_buf_size set at service response time
+    size_t msg_size = client_payload_size();
+    // add the leftover bytes as op_buf overwrites sizeof(zk_payload_t)
+    // op_buf_size could be < zk_payload_t?
+    if (op_buf_size > sizeof(zk_payload_t)) {
+      msg_size += op_buf_size - sizeof(zk_payload_t);
+    }
+    fmt_rt_assert(msg_size > client_payload_size(),
+                  "Populate client get_children response too small got %zu "
+                  "want %zu", msg_size, client_payload_size());
+    fmt_rt_assert(msg_size < kMaxClientResponseSize,
+                  "Size of get children response too large (%zu children) %zu. "
+                  "Max get_children client response size\n",
+                  reinterpret_cast<get_children_t *>(op_buf)->nchildren,
+                  msg_size, kMaxClientResponseSize);
+    req_handle->dyn_resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(msg_size);
+    payload = reinterpret_cast<client_payload_t *>(
+        req_handle->dyn_resp_msgbuf.buf);
+    ret_msgbuf = &req_handle->dyn_resp_msgbuf;
+  }
   payload->proxy_id = proxy_id;
   payload->client_id = client_id;
   payload->client_reqid = client_reqid;
-  copy_seq_reqs(payload->seq_reqs, seq_reqs);
-}
+  erpc::rt_assert(raft_is_leader(batch->proxy->raft),
+                  "was not the leader when responding to client\n");
+  payload->not_leader = !raft_is_leader(batch->proxy->raft);
+  erpc::rt_assert(payload->not_leader == 0,
+                  "claiming I'm not the leader while responding to an op\n");
 
+  if (reqtype != ReqType::kGetChildren) {
+    payload->zk_payload = zk_payload;
+  } else {
+    memcpy(static_cast<void *>(&payload->zk_payload), op_buf, op_buf_size);
+  }
+  return ret_msgbuf;
+}
 
 inline void
 ClientOp::respond_to_client() {
@@ -1111,7 +1774,6 @@ ClientOp::respond_to_client() {
   proxy->client_retx_done_map[client_id][client_reqid] = this;
 
   if (!has_handle) {
-    // should this be in below check?
     // add to done map and remove from the in_progress map
     LOG_THREAD("no handle adding client_id %lu op %lu from to done_map\n",
                client_id, client_reqid);
@@ -1120,35 +1782,17 @@ ClientOp::respond_to_client() {
     return;
   }
 
-
   proxy->ops_with_handles[client_id].erase(client_reqid);
 
-  populate_client_response();
-  auto *payload = reinterpret_cast<client_payload_t *>(
-      req_handle->pre_resp_msgbuf.buf);
+  erpc::MsgBuffer *resp_msgbuf = populate_client_response();
+  erpc::rt_assert(resp_msgbuf->get_data_size() > 0,
+                  "get_children Data size was 0 in client response\n");
+  batch->c->rpc->enqueue_response(req_handle, resp_msgbuf);
 
-  // adding to explicitly say I am the leader
-  // if I'm replying with a number to a client I better be the leader
-  erpc::rt_assert(raft_is_leader(batch->proxy->raft),
-                  "was not the leader when responding to client\n");
-  payload->not_leader = !raft_is_leader(batch->proxy->raft);
-
-  if (payload->not_leader != 0) {
-    printf("going to claim I am not the leader: is_leader?: %d\n",
-           raft_is_leader(batch->proxy->raft));
-    fflush(stdout);
-  }
-
-  erpc::rt_assert(payload->not_leader == 0,
-                  "claiming I'm not the leader while responding to an op\n");
-
-  LOG_THREAD("responding client to op\n");
-  batch->c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
   batch->completed_ops++;
 
   req_handle = nullptr;
   has_handle = false;
-
   batch->c->stat_resp_tx_tot++;
 #endif
 }
@@ -1172,7 +1816,12 @@ connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
   int session_num;
 
   uri = ip + port;
+  LOG_INFO("Connecting with uri %s, remote_tid %d\n", uri.c_str(), remote_tid);
+
   session_num = c->rpc->create_session(uri, remote_tid);
+
+  LOG_INFO("Max num sessions %zu\n", c->rpc->get_max_num_sessions());
+
   erpc::rt_assert(session_num >= 0, "Failed to create session");
 
   if (machine_idx != MachineIdx::CLIENT) {
@@ -1208,6 +1857,7 @@ connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
 
   uri = ip + port;
   session_num = c->rpc->create_session(uri, remote_tid);
+
   erpc::rt_assert(session_num >= 0, "Failed to create session");
 
   // why don't we wait for CLIENT?
@@ -1222,6 +1872,73 @@ connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
   LOG_INFO("Connected to %s with session num: %d\n", ip.c_str(), session_num);
 
   return 0;
+}
+
+// Connect to Rpc endpoints and push session numbers onto session vector
+// for future use
+int
+connect_to_zk_machine(WorkerContext *c,
+                      size_t idx,
+                      size_t rep_num,
+                      size_t sv_i) {
+  std::string uri;
+  std::string port = ":31850";
+  int session_num;
+
+  uri = c->zk_ips[idx] + port;
+
+
+  for (uint8_t thread = 0; thread < N_ZKTHREADS; thread++) {
+    printf("Connecting with uri %s, remote_tid %d\n", uri.c_str(), thread);
+
+    session_num = c->rpc->create_session(uri, thread);
+
+    erpc::rt_assert(session_num >= 0, "Failed to create session");
+
+    while (!c->rpc->is_connected(session_num) && !force_quit) {
+      c->rpc->run_event_loop_once();
+      c->proxies.begin()->second->call_raft_periodic(10);
+    }
+
+    c->zk_session_nums[sv_i + thread][rep_num] = session_num;
+    printf("Connected to sv_i %zu thread %d  rep_num %zu with session num: %d\n",
+           sv_i, thread, rep_num, session_num);
+  }
+  fflush(stdout);
+
+  return 0;
+}
+
+void
+establish_zk_connections(WorkerContext *c) {
+  LOG_INFO(
+      "Establishing zk_ips size %lu N_ZKTHREADS %d repfac %u %lu ZooKeeper connections... \n",
+      c->zk_ips.size(),
+      N_ZKTHREADS,
+      kZKReplicationFactor,
+      (c->zk_ips.size() * N_ZKTHREADS));
+  // one outer vector with nested vectors as shard connections
+  c->zk_session_nums.resize(
+      (c->zk_ips.size() * N_ZKTHREADS) / kZKReplicationFactor);
+
+  for (size_t i = 0; i < c->zk_session_nums.size(); i++)
+    c->zk_session_nums[i].resize(kZKReplicationFactor);
+
+  size_t rep_num = 0;
+  size_t j = 0;
+
+  // for each shard
+  for (size_t i = 0; i < c->zk_ips.size(); i++) {
+    connect_to_zk_machine(c, i, rep_num, j);
+
+    fmt_rt_assert(c->zk_session_nums.size() == nsequence_spaces,
+                  "nshards %zu != %zu nsequence_spaces\n",
+                  c->zk_session_nums.size(), nsequence_spaces);
+    rep_num = (rep_num + 1) % kZKReplicationFactor;
+    if (rep_num == 0) j += N_ZKTHREADS;
+  }
+
+  LOG_INFO("...done establishing ZooKeeper connections.\n");
 }
 
 /**
@@ -1254,10 +1971,12 @@ connect_and_store_session_async(WorkerContext *c, std::string ip,
   return 0;
 }
 
-
+// Connect to dependency trackers, sequencer. If thread 0, connect to your
+// garbage collection buddy
 inline void
 establish_cats_connections(WorkerContext *c, int remote_tid) {
   printf("\nEstablishing CATS connections...\n");
+
   printf("Connecting to Rpcid %d on machines:", remote_tid);
 #if !MOCK_SEQ
   printf("\nsequencer: ");
@@ -1293,13 +2012,13 @@ create_logical_proxies(WorkerContext *c) {
   printf("Creating logical proxies...\n");
   Proxy *p;
 
-  if (my_raft_id == 0) {
+  if (my_raft_id == 0) { // leaders
     p = new Proxy(c, true, FLAGS_proxy_id_start + c->thread_id);
     printf("creating proxy leader with proxy id %lu\n",
            FLAGS_proxy_id_start + c->thread_id);
     fflush(stdout);
     c->proxies[FLAGS_proxy_id_start + c->thread_id] = p;
-  } else {
+  } else { // followers
     p = new Proxy(c, false, FLAGS_proxy_id_start + c->thread_id);
     printf("creating proxy follower with proxy id %lu\n",
            FLAGS_proxy_id_start + c->thread_id);
@@ -1309,7 +2028,6 @@ create_logical_proxies(WorkerContext *c) {
 
   fflush(stdout);
 }
-
 
 // Threads' main loop:
 // - connect to seq, backends if applicable
@@ -1329,6 +2047,9 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
   }
   c.nconnections = 0;
 
+  // make a list of all the corfu ips
+  boost::split(c.zk_ips, FLAGS_zk_ips, boost::is_any_of(","));
+
 #if !NO_ERPC
   int remote_tid = tid % N_SEQTHREADS;
 
@@ -1340,9 +2061,9 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
                                   sm_handler, tid % NPHY_PORTS);
   printf("... created RPC endpoint\n");
 
-  rpc.set_pre_resp_msgbuf_size(client_payload_size(nsequence_spaces));
+  rpc.set_pre_resp_msgbuf_size(MAX_PRE_RESP_MSGBUF);
 
-  printf("max message size %zu\n", c.rpc->get_max_msg_size());
+  printf("max message size %zu\n", kMaxMsgSize);
 
   rpc.retry_connect_on_invalid_rpc_id = true;
   printf("Done creating RPC endpoint\n");
@@ -1360,6 +2081,7 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
 
   if (PLOT_RECOVERY) {
     printf("\nclient: ");
+    fflush(stdout);
     connect_and_store_session(&c, client_ip, 0, MachineIdx::CLIENT);
   }
 
@@ -1374,16 +2096,14 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
     raft_set_election_timeout(proxy->raft,
                               kRaftElectionTimeout);
     if (proxy->am_leader) {
-
       printf("first call to raft_periodic\n");
       // guarantees this one tries to become the leader
       raft_periodic(proxy->raft, kRaftElectionTimeout * 2 + 1);
       proxy->raft_periodic_tsc = erpc::rdtsc();
     }
-
-
   }
 
+  establish_zk_connections(&c);
 
 #else
   (void)nexus;
@@ -1403,7 +2123,6 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
   if (kUtilPrinting) {
     c.init_util_timers();
   }
-  // LOG_RAFT("initiated timers\n");
 
   while (likely(!force_quit)) {
     if (unlikely(c.in_recovery)) {
@@ -1429,7 +2148,7 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
       raft_apply_all(proxy->raft);
 
       if (unlikely(raft_get_log_count(proxy->raft) >=
-                   FLAGS_max_log_size)) {
+          FLAGS_max_log_size)) {
         proxy->proxy_snapshot();
       }
     }
@@ -1470,7 +2189,7 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
 
             printf("[%s] pid: %u lost leadership at some point "
                    "with outstanding requests, return not leader\n",
-                erpc::get_formatted_time().c_str(), p->proxy_id);
+                   erpc::get_formatted_time().c_str(), p->proxy_id);
             fflush(stdout);
 
             reply_not_leader(op->req_handle, p->proxy_id,
@@ -1532,7 +2251,6 @@ inline void Proxy::call_raft_periodic(size_t nms) {
 //9. Peer calls raft_node_set_active to nodes as per the snapshot's membership info.
 //10. Finally, peer calls raft_node_set_active to nodes as per the snapshot's membership info.
 //**/
-// todo how often do we want to call this?
 void
 Proxy::proxy_snapshot() {
   // tell raft we are starting the snapshot
@@ -1542,12 +2260,13 @@ Proxy::proxy_snapshot() {
   // serialize and write proxy struct to file with boost
   std::string temp;
   temp = "/usr/local/snapshot" + c->my_ip + std::to_string(c->thread_id) +
-         std::to_string(proxy_id);
+      std::to_string(proxy_id);
 
   last_included_index = raft_get_commit_idx(raft);
   last_included_term = raft_get_entry_from_idx(raft, last_included_index)->term;
 
-  uint64_t tf_start; (void) tf_start;
+  uint64_t tf_start;
+  (void) tf_start;
   uint64_t t_start __attribute__((unused));
   {
     // ofs must be closed before ifs, putting it in its own scope ensures that
@@ -1561,18 +2280,17 @@ Proxy::proxy_snapshot() {
     tf_start = erpc::rdtsc();
   }
   LOG_INFO("%s Serialization took %Lf us flush time %Lf\n",
-         p_string().c_str(), cycles_to_usec(erpc::rdtsc() - t_start),
-         cycles_to_usec(erpc::rdtsc() - tf_start));
+           p_string().c_str(), cycles_to_usec(erpc::rdtsc() - t_start),
+           cycles_to_usec(erpc::rdtsc() - tf_start));
 
   // tell raft we are done snapshotting
   raft_end_snapshot(raft);
 }
 
-
 // Launch proxy worker threads with configured numbers of leaders/followers
 inline void
 launch_threads(size_t nthreads, erpc::Nexus *nexus) {
-  // Spin up the requisite number of threads
+  // Spin up the requisite number of sequencer threads
   std::vector<std::thread> threads(nthreads);
   context_vector = new std::vector<WorkerContext *>(nthreads);
   auto *app_stats = new app_stats_t[nthreads];
@@ -1597,7 +2315,6 @@ launch_threads(size_t nthreads, erpc::Nexus *nexus) {
 
   printf("deleting app_stats... ");
   fflush(stdout);
-//    delete[] app_stats;
   printf("done deleting app_stats\n");
   fflush(stdout);
 }
@@ -1630,7 +2347,6 @@ signal_handler(int signum) {
   }
   if (signum == SIGBUS) {
     fflush(stdout);
-
     void *array[10];
     int size;
 
@@ -1645,7 +2361,6 @@ signal_handler(int signum) {
   fflush(stdout);
 }
 
-
 int
 main(int argc, char **argv) {
   freq_ghz = erpc::measure_rdtsc_freq();
@@ -1654,6 +2369,14 @@ main(int argc, char **argv) {
   printf("Size of client op struct: %zu\n", sizeof(ClientOp));
   printf("Size of batch struct: %zu\n", sizeof(Batch));
   printf("Size of tag struct: %zu\n", sizeof(Tag));
+
+  LOG_INFO("cp %zu sr %zu readdel %zu ac %zu cn %zu r %zu cmdata %zu tot %zu\n",
+           sizeof(client_payload_t), sizeof(seq_req_t), sizeof(delete_node_t),
+           sizeof(add_child), sizeof(create_node_t), sizeof(app_appendentries_t),
+           sizeof(client_mdata_t),
+           sizeof(client_payload_t) + sizeof(seq_req_t) + sizeof(delete_node_t) +
+           sizeof(add_child) + sizeof(create_node_t) + sizeof(app_appendentries_t) +
+           sizeof(client_mdata_t));
 
   printf("app_stats_t size: %zu\n", sizeof(app_stats_t));
   fflush(stdout);
@@ -1690,6 +2413,7 @@ main(int argc, char **argv) {
 
   erpc::rt_assert(FLAGS_nthreads > 0, "nthreads must be > 0\n");
 
+  // if
   if (nextproxy0_ip.empty()) {
     printf("nextproxy is empty setting no_gc to true.\n");
     // todo we can still do garbage collection if there is one proxy
@@ -1703,10 +2427,35 @@ main(int argc, char **argv) {
   printf("Creating nexus object for URI %s...\n", uri.c_str());
   erpc::Nexus nexus(uri, numa_node, 0);
 
-  // Normal operation handlers
+  // CATSKeeper operation handlers
   nexus.register_req_func(
-      static_cast<uint8_t>(ReqType::kExecuteOpA),
+      static_cast<uint8_t>(ReqType::kCreateZNode),
       client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kRenameZNode),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kDeleteZNode),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kWriteZNode),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kReadZNode),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kExists),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kGetChildren),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kDeleteClientConnection),
+      client_op_handler);
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kClientHeartbeat),
+      client_heartbeat_handler);
+
   nexus.register_req_func(
       static_cast<uint8_t>(ReqType::kDoGarbageCollection),
       garbage_collection_handler);
@@ -1745,6 +2494,11 @@ main(int argc, char **argv) {
   nexus.register_req_func(
       static_cast<uint8_t>(ReqType::kRecoveryComplete),
       recovery_complete_handler);
+
+  // Connections are per nexus (machine).
+  LOG_INFO("kNumRxRingEntries %zu kSessionCredits %zu max connections %zu\n",
+           erpc::Transport::kNumRxRingEntries, erpc::kSessionCredits,
+           erpc::Transport::kNumRxRingEntries/erpc::kSessionCredits);
 
   printf("Launching %zu threads...\n", FLAGS_nthreads);
   launch_threads(FLAGS_nthreads, &nexus);

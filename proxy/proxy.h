@@ -11,12 +11,12 @@
 #define DEBUG_RECOVERY 0
 #define DEBUG_BITMAPS 0
 #define DEBUG_COMPACTION 0 // unused
-
 #define DEBUG_GC 0
 
 #define MOCK_SEQ 0
 #define MOCK_DT 0
 #define MOCK_CLI 0
+
 #define PRINT_TIMING 0
 
 #include <string>
@@ -28,18 +28,16 @@ bool kHeartbeats = true;
 extern double freq_ghz;
 
 #define MAX_OPS_PER_BATCH 512
-
-#define MAX_OUTSTANDING_AE 16
-int kRaftElectionTimeout = 1000;
-
+#define MAX_OUTSTANDING_AE 16 // prevent unacked requests from growing
+const int kRaftElectionTimeout = 3000;
 
 #define NO_ERPC (MOCK_DT && MOCK_CLI && MOCK_SEQ)
 
-const int MAX_LEADERS_PER_THREAD = 256; // unused
+const int MAX_LEADERS_PER_THREAD = 256;
 const int SEC_TIMER_US = 1000000;
 const int STAT_TIMER_US = SEC_TIMER_US;
-const int SEQ_HEARTBEAT_US = 500000;
-const int GC_TIMER_US = 10000;
+const int SEQ_HEARTBEAT_US = 12500000;
+const int GC_TIMER_US = 100000;
 
 enum {
   STAT_TIMER_IDX = 0,
@@ -53,10 +51,10 @@ enum {
 #define IDENT(x) x
 #define XSTR(x) #x
 #define STR(x) XSTR(x)
-#define PATH(x,y) STR(IDENT(x)IDENT(y))
+#define PATH(x, y) STR(IDENT(x)IDENT(y))
 
 #define Fname /common.h
-#include PATH(COMMON_DIR,Fname)
+#include PATH(COMMON_DIR, Fname)
 
 #include "common.h"
 #include "bitmap.h"
@@ -73,6 +71,7 @@ extern "C" {
 #include <boost/serialization/unordered_map.hpp>
 #include <boost/serialization/vector.hpp>
 #include <boost/serialization/priority_queue.hpp>
+#include <boost/serialization/is_bitwise_serializable.hpp>
 #include <boost/functional/hash.hpp>
 #include <boost/archive/text_oarchive.hpp>
 #include <boost/archive/text_iarchive.hpp>
@@ -80,7 +79,7 @@ extern "C" {
 
 size_t numa_node = 0;
 volatile bool force_quit = false;
-static constexpr double kAppLatFac = 3.0;        // Precision factor for latency
+static constexpr double kAppLatFac = 3.0; // Precision factor for latency
 extern std::string backupseq_ip;
 
 extern size_t nsequence_spaces;
@@ -144,6 +143,8 @@ DEFINE_int64(max_log_size, 10000,
              "Determines how often to snapshot.");
 DEFINE_uint64(nsequence_spaces, 5,
               "The number of sequence spaces we are running with.");
+DEFINE_string(zk_ips, "",
+              "ZooKeeper IP addresses");
 
 raft_node_id_t my_raft_id;
 raft_node_id_t replica_1_raft_id;
@@ -200,16 +201,26 @@ struct app_stats_t {
 
 // Forward declarations
 class WorkerContext;
+
 class Batch;
+
 class Proxy;
+
 static void batch_to_cb(void *);
+
 static void initiate_garbage_collection(void *);
+
 static void print_stats(void *);
+
 static void initiate_recovery(void *);
+
 static void send_heartbeat(void *);
+
 void replace_seq_connection(WorkerContext *, int);
+
 int
 connect_and_store_session_async(WorkerContext *, std::string, int, MachineIdx);
+
 void reset_dt_timer(WorkerContext *c, uint8_t dt_idx);
 
 // Replication structs
@@ -252,7 +263,7 @@ typedef struct ae_response {
 
 enum class EntryType : uint8_t {
   kSequenceNumberNoncontig = 0,
-  kSwitchToBackupSeq,
+  kSwitchToBackupSeq, // Switch to backup sequencer
   kDummy,
 };
 
@@ -260,10 +271,11 @@ typedef struct client_mdata {
   ReqType reqtype;
   uint16_t client_id;
   client_reqid_t client_reqid;
-  uint64_t seqnum;
+  zk_payload_t zk_payload;
   seq_req_t *seq_reqs;
 } client_mdata_t;
 
+// what is the +8 for?
 #define ENTRY_SIZE(x) (sizeof(entry_t) + (sizeof(client_mdata_t) + sizeof(seq_req_t) * nsequence_spaces) * x + sizeof(uint64_t)*nsequence_spaces + 8)
 typedef struct entry {
   // this stuff should be separated to a different struct because
@@ -271,12 +283,10 @@ typedef struct entry {
   // deserializing to use cmdata_buf
   Batch *batch;
   uint64_t highest_cons_batch_id;
-
   EntryType type;
   uint64_t seq_req_id;
   uint64_t batch_id;
   uint16_t batch_size;
-
   uint64_t *base_seqnums;
   client_mdata_t *cmdata_buf;
 
@@ -292,7 +302,7 @@ typedef struct entry {
 inline entry_t *init_entry(size_t nops) {
   auto *entry = new entry_t;
   entry->base_seqnums = new uint64_t[nsequence_spaces];
-  erpc::rt_assert(entry->base_seqnums != nullptr, "baseseqnums null\n");
+  erpc::rt_assert(entry->base_seqnums != nullptr, "base seqnums null\n");
   entry->cmdata_buf = new client_mdata_t[nops];
   for (size_t i = 0; i < nops; i++) {
     entry->cmdata_buf[i].seq_reqs = new seq_req_t[nsequence_spaces];
@@ -308,15 +318,17 @@ inline void serialize_entry(uint8_t *_buf, entry_t *src_entry) {
   buf += sizeof(entry_t);
 
   // cpy base seqnums array
-  rte_memcpy(buf, src_entry->base_seqnums, sizeof(uint64_t) * nsequence_spaces);
+  memcpy(buf, src_entry->base_seqnums, sizeof(uint64_t) * nsequence_spaces);
   buf += sizeof(uint64_t) * nsequence_spaces;
 
   for (size_t i = 0; i < src_entry->batch_size; i++) {
     *(reinterpret_cast<client_mdata_t *>(buf)) = src_entry->cmdata_buf[i];
     reinterpret_cast<client_mdata_t *>(buf)->seq_reqs = nullptr;
     buf += sizeof(client_mdata_t);
-    rte_memcpy(buf, src_entry->cmdata_buf[i].seq_reqs,
-               nsequence_spaces * sizeof(seq_req_t));
+
+    memcpy(buf,
+           src_entry->cmdata_buf[i].seq_reqs,
+           nsequence_spaces * sizeof(seq_req_t));
     buf += nsequence_spaces * sizeof(seq_req_t);
   }
 }
@@ -335,7 +347,7 @@ inline entry_t *deserialize_entry(void *src_buf) {
   buf += sizeof(entry_t);
 
   // copy base seqnums array
-  rte_memcpy(entry->base_seqnums, buf, sizeof(uint64_t) * nsequence_spaces);
+  memcpy(entry->base_seqnums, buf, sizeof(uint64_t) * nsequence_spaces);
   buf += sizeof(uint64_t) * nsequence_spaces;
 
   for (size_t i = 0; i < entry->batch_size; i++) {
@@ -347,8 +359,9 @@ inline entry_t *deserialize_entry(void *src_buf) {
         reinterpret_cast<client_mdata_t *>(buf)->seq_reqs == nullptr);
     buf += sizeof(client_mdata_t);
 
-    rte_memcpy(entry->cmdata_buf[i].seq_reqs, buf,
-               nsequence_spaces * sizeof(seq_req_t));
+    memcpy(entry->cmdata_buf[i].seq_reqs,
+           buf,
+           nsequence_spaces * sizeof(seq_req_t));
     buf += nsequence_spaces * sizeof(seq_req_t);
   }
   return entry;
@@ -366,6 +379,8 @@ typedef struct gc_payload {
   gc_pair_t pairs[1];
 } __attribute__((__packed__)) gc_payload_t;
 
+class ClientOp;
+
 class Tag {
  public:
   bool msgbufs_allocated = false;
@@ -373,17 +388,28 @@ class Tag {
   uint64_t batch_id;
   WorkerContext *c;
   bool failover = false;
+  ClientOp *op;
+
+  std::vector<size_t> *replies; // how many replies from each shard
+  bool *returned_to_client;
+  seq_req_t *seq_reqs;
+  size_t my_shard_idx;
+
+  // added for unsequenced operations
+  erpc::ReqHandle *req_handle;
+
 #if !NO_ERPC
   erpc::MsgBuffer req_msgbuf;
   erpc::MsgBuffer resp_msgbuf;
 #else
   char *req_msgbuf;
-  char *resp_msgbuf;
+      char *resp_msgbuf;
 #endif
 
   ~Tag();
-
   void alloc_msgbufs(WorkerContext *, Batch *, bool);
+  void alloc_msgbufs(WorkerContext *);
+  void alloc_zk_msgbufs(WorkerContext *);
 };
 
 uint64_t update_avg(uint64_t s, double prev_avg, int prev_N) {
@@ -400,10 +426,12 @@ void copy_seq_reqs(seq_req_t dst[], seq_req_t src[]) {
 // Classes
 class ClientOp {
  public:
+  WorkerContext *c;
   ReqType reqtype;
   uint16_t client_id;
   uint16_t proxy_id;
   uint64_t batch_id;
+
   client_reqid_t local_reqid;  // proxy-assigned reqid
   client_reqid_t client_reqid;  // client-assigned reqid
 
@@ -411,7 +439,7 @@ class ClientOp {
   bool has_handle = false;
 
   // if we rebuilt from a snapshot, we don't have this handle
-  // to respond when the op is completed
+  // To respond when the op is completed
   erpc::ReqHandle *req_handle;
 
   // if we serialize these, it will reserialize the entire proxy --> cycle
@@ -420,6 +448,21 @@ class ClientOp {
   Proxy *proxy;
 
   seq_req_t *seq_reqs = new seq_req_t[nsequence_spaces];
+  // we need an arbitrarily sized app buffer now because get_children has
+  // some n children where n is unknown
+  // for now we could just use this for get_children...
+  size_t op_buf_size = 128;
+  uint8_t *op_buf = new uint8_t[128];
+
+  __inline__ void grow_to_accommodate(size_t size) {
+    if (unlikely(op_buf_size < size)) {
+      delete[] op_buf;
+      op_buf = new uint8_t[size];
+      op_buf_size = size;
+    }
+  }
+
+  zk_payload_t zk_payload;
 
   void populate(ReqType rtype, uint16_t cid, client_reqid_t c_reqid,
                 uint16_t pid, erpc::ReqHandle *handle, client_reqid_t l_reqid,
@@ -437,7 +480,7 @@ class ClientOp {
 
   void populate(ReqType rtype, uint16_t cid, client_reqid_t c_reqid,
                 uint16_t pid, erpc::ReqHandle *handle, client_reqid_t l_reqid,
-                Proxy *px, seq_req_t *_seq_reqs) {
+                Proxy *px, WorkerContext *_c, zk_payload_t _zk_payload) {
     reqtype = rtype;
     client_id = cid;
     client_reqid = c_reqid;
@@ -447,16 +490,18 @@ class ClientOp {
     local_reqid = l_reqid;
     has_handle = handle != nullptr;
     committed = false;
+    c = _c;
+    zk_payload = _zk_payload;
 
-    // should make this take a list of sequence spaces?
-    copy_seq_reqs(seq_reqs, _seq_reqs);
+    // should make this take a list of sequence spaces or something???
+    memset(seq_reqs, 0, nsequence_spaces * sizeof(seq_req_t));
   }
 
   void respond_to_client();
 
   void mock_respond_to_client();
 
-  void populate_client_response();
+  erpc::MsgBuffer *populate_client_response();
 
   void mock_populate_client_response(client_payload_t *);
 
@@ -475,6 +520,8 @@ class ClientOp {
               << std::endl;
   }
 
+  void set_seq_reqs();
+
   template<class Archive>
   void serialize(Archive &ar, const unsigned int) {
     ar & reqtype;
@@ -483,6 +530,13 @@ class ClientOp {
     ar & batch_id;
     ar & local_reqid;  // proxy-assigned reqid
     ar & client_reqid;  // client-assigned reqid
+    ar & boost::serialization::make_array(
+        reinterpret_cast<uint8_t *>(&zk_payload),
+           sizeof(zk_payload_t));
+    ar & op_buf_size;
+    for (size_t i = 0; i < op_buf_size; i++) {
+      ar & op_buf[i];
+    }
     for (size_t i = 0; i < nsequence_spaces; i++)
       ar & seq_reqs[i];
   }
@@ -511,7 +565,7 @@ class Batch {
 
   // Operations in this batch
   std::vector<ClientOp *>
-      batch_client_ops; // todo can we refactor this to "client_ops"?
+      batch_client_ops;
 
   // For FIFO ordering: maps client id to last client op in this batch
   // (if one has been added)
@@ -523,6 +577,7 @@ class Batch {
   // not used on the followers
   seq_req_t *seq_reqs = new seq_req_t[nsequence_spaces];
 
+  // may need a map from client_id, crid to bool acked
   std::unordered_map<std::pair<uint16_t, client_reqid_t>, bool,
                      boost::hash<std::pair<uint16_t, client_reqid_t>>>
       acked_ops;
@@ -552,12 +607,12 @@ class Batch {
   void request_seqnum(bool);
   void mock_request_seqnum(bool);
   void populate_seqnum_request_buffer(Tag *);
-  void assign_seqnums_to_ops_ms_test();
+  void assign_seqnums_to_ops_ms_test(); // todo rename to ...ops()
   void replicate_seqnums();
   void record_ms_seqnums();
   void replicate(EntryType);
 
-  // service-related functions
+  // Overlying system-related functions
   void submit_batch_to_system();
   bool ack_op(ClientOp *);
 
@@ -571,8 +626,6 @@ class Batch {
     ar & batch_id;
     ar & proxy_id;
     ar & seq_req_id;
-
-    // Operations in this batch
     ar & batch_client_ops;
     ar & completed_ops;
     ar & highest_crid_this_batch;
@@ -580,7 +633,6 @@ class Batch {
     ar & seqnum;
     ar & raft_entry_response;
     ar & has_seqnum;
-
     for (size_t i = 0; i < nsequence_spaces; i++)
       ar & seq_reqs[i];
   }
@@ -644,7 +696,6 @@ class Proxy {
   uint64_t seq_req_id = 1;
   uint64_t highest_del_seq_req_id = 0;
 
-  // last time sent a snapshot to prevent Raft from spamming snapshots...
   bool snapshot_done_sending[3] = {true, true, true};
   uint64_t freq_ghz = erpc::measure_rdtsc_freq();
 
@@ -693,7 +744,7 @@ class Proxy {
   // in appended with kDep: will not be executed until I become leader
   // in appended with kSeq: will not be executed until I become leader
   std::unordered_map<uint64_t, Batch *> appended_batch_map;
-  // todo remove as there are no DTs anymore
+  // todo, this isn't even used anymore since there are no DTs
   std::unordered_map<uint64_t, Batch *> need_seqnum_batch_map;
 
   // sticks around until destroyed when clients ack
@@ -713,8 +764,8 @@ class Proxy {
       ops_with_handles;
 
   std::priority_queue<uint64_t, std::vector<uint64_t>, CmpBatchIds>
-      done_batch_ids;
-  uint64_t highest_cons_batch_id = 0;
+      done_batch_ids; // no pointers
+  uint64_t highest_cons_batch_id = 0; // shipped during replication
 
   // Used for recovery and for dummy entries
   msg_entry_response_t dummy_entry_response;
@@ -722,7 +773,7 @@ class Proxy {
   AppMemPool<Tag> tag_pool;
 
   // Recovery-related state
-  Bitmap **received_seqnums; // todo remove?
+  Bitmap **received_seqnums;
 
   std::string p_string();
 
@@ -732,14 +783,13 @@ class Proxy {
     batch->reset(c, this, proxy_id, batch_counter++);
     current_batch = batch;
 
-    // followers will segfault here
+    // followers will segfault here!
     reset_batch_timer();
   }
 
   void update_ackd_reqids(uint16_t, int64_t);
 
   void push_and_update_highest_cons_batch_id(uint64_t bid) {
-    // allows pushing twice
     if (highest_cons_batch_id > bid) {
       // already processed
       return;
@@ -750,20 +800,14 @@ class Proxy {
     // behind highest_cons_batch_id, but it is safe to get rid of
     // everything up until highest_cons_batch_id:
     // pop until top >= highest_cons_batch_id
-    uint64_t prev_top = done_batch_ids.top();
     while (unlikely(done_batch_ids.top() < highest_cons_batch_id)) {
       done_batch_ids.pop();
     }
-
-    debug_print(0, "%s acking bid %zu top %zu prev_top %zu hcbid %zu\n",
-                p_string().c_str(), bid, done_batch_ids.top(), prev_top,
-                highest_cons_batch_id);
 
     while (!done_batch_ids.empty() &&
         (done_batch_ids.top() == highest_cons_batch_id + 1 ||
             done_batch_ids.top() == highest_cons_batch_id)) {
       highest_cons_batch_id = done_batch_ids.top();
-      debug_print(0, "updating hcbid %zu\n", highest_cons_batch_id);
       done_batch_ids.pop();
     }
   }
@@ -790,7 +834,9 @@ class Proxy {
 
     // if it is kSeq we send no metadata
     entry = reinterpret_cast<entry_t *>(malloc(ENTRY_SIZE(1)));
+
     entry->batch = nullptr;
+
     // initialize raft entry
     entry->type = type;
 
@@ -799,11 +845,10 @@ class Proxy {
     raft_entry.type = RAFT_LOGTYPE_NORMAL;
     raft_entry.data.buf = entry;
     raft_entry.data.len =
-        sizeof(entry_t) + sizeof(client_mdata_t) * 1; // todo *1???
+        sizeof(entry_t) + sizeof(client_mdata_t) * 1;
     raft_entry.id =
         my_raft_id;
 
-    // submit the entry for replication
     raft_recv_entry(this->raft, &raft_entry, &this->dummy_entry_response);
 
     dummy_replicated = false;
@@ -815,7 +860,7 @@ class Proxy {
   void gain_leadership();
 
   /**
-   * This is for when the proxy loses leadership
+   * This is for when the proxy loses leadership!
    *
    */
   void stop_timers() {
@@ -826,10 +871,10 @@ class Proxy {
   void lose_leadership() {
     printf("I JUST LOST LEADERSHIP for %d\n", proxy_id);
     fflush(stdout);
-    // stop all timers
     stop_timers();
   }
 
+  // Destructor
   ~Proxy() {
     delete[] received_seqnums;
     printf("in proxy destructor, btimer %p\n",
@@ -880,10 +925,9 @@ class Proxy {
   void proxy_snapshot();
   /*** rest of proxy def here ***/
 
-  // For creating a batch on a follower
+  // For creating a batch on a follower!
   Batch *create_new_follower_batch(entry_t *ety) {
     Batch *b = batch_pool.alloc();
-
     if (ety->batch_id >= batch_counter)
       batch_counter = ety->batch_id + 1;
     if (ety->seq_req_id >= seq_req_id)
@@ -893,12 +937,11 @@ class Proxy {
     b->c = c;
     b->proxy = this;
     b->proxy_id = proxy_id;
-    b->completed_ops = 0;
+    b->completed_ops = 0; // todo
     b->batch_client_ops.clear();
     b->acked_ops.clear();
     b->has_seqnum = false;
     b->seq_req_id = ety->seq_req_id;
-
     return b;
   }
 
@@ -951,7 +994,6 @@ class Proxy {
 
   // bid must be monotonically increasing across calls
   void delete_done_batches(uint64_t bid) {
-    // uint64_t... to avoid corner case we don't delete 0 until 1 is ackd
     if (bid == 0) return;
 
     // all batches <= bid are safe to delete, unless it is 0
@@ -960,7 +1002,6 @@ class Proxy {
     while (in_done_batch_map(bid)) {
       Batch *b = done_batch_map[bid];
 
-      // for PQ
       deleted_seq_req_ids.push(b->seq_req_id);
       while (!deleted_seq_req_ids.empty() &&
           (deleted_seq_req_ids.top() == highest_del_seq_req_id + 1 ||
@@ -989,32 +1030,36 @@ class Proxy {
   // took a version
   void serialize(Archive &ar, const unsigned int);
 
+  // Testing
   void add_dummy_client_ops();
 };
 
+// only prints when it is acking won't show the thing we are waiting for...
 bool Batch::ack_op(ClientOp *op) {
   fmt_rt_assert(acked_ops.size() == batch_size(),
-      "acked_ops not the correct size ao %zu bs %zu",
-      acked_ops.size(), batch_size());
+                "acked_ops not the correct size ao %zu bs %zu",
+                acked_ops.size(), batch_size());
   // on new leaders I think this can be false but already acked if we have
   // serialized and started from snapshot on a follower that became the leader
   if (!acked_ops[{op->client_id, op->client_reqid}]) {
     acked_ops[{op->client_id, op->client_reqid}] = true;
   }
-  // the above assert should be enough for this...
+  // the above assert should actually be enough for this...
   fmt_rt_assert(!acked_ops.empty(), "acking a client op (%zu, %ld) with an"
-                                      " empty acked_ops map\n",
-                                      op->client_id, op->client_reqid);
+                                    " empty acked_ops map\n",
+                op->client_id, op->client_reqid);
   // if any is not acked this isn't acked, if all acked the batch is
   for (auto pair : acked_ops) {
     if (!pair.second) return false;
-  } return true;
+  }
+  return true;
 }
 
 class RecoveryContext {
  public:
   WorkerContext *c;
   Bitmap *agg;
+//        Batch *recovery_batch;
   std::vector<Batch *> *recovery_batches;
   FILE *fp;
 
@@ -1025,7 +1070,6 @@ class RecoveryContext {
   }
 
   ~RecoveryContext() {
-    // delete agg;
   }
 };
 
@@ -1075,6 +1119,7 @@ class WorkerContext : public ThreadContext {
   uint8_t leaders_this_thread;
   erpc::ReqHandle *backup_ready_handle = nullptr;
 
+  // using these seems to be ok
   bool received_gc_response0 = true;
   bool received_gc_response1 = true;
   bool received_gc_response2 = true;
@@ -1104,6 +1149,42 @@ class WorkerContext : public ThreadContext {
   size_t snapshot_rpcs = 0;
   std::unordered_map<size_t, snapshot_request_t *> snapshot_requests;
 
+  // vector from replica group to session nums for each replica in the group
+  // a replica group is 1 thread on 3 machines
+  std::vector<std::vector<int>> zk_session_nums;
+  std::vector<std::string> zk_ips;
+
+  std::unordered_map<client_id_t, size_t> cid_to_shard;
+  size_t next_shard_idx = 0;
+
+  size_t cid_to_shard_idx(client_id_t cid) {
+    return proxies.begin()->second->proxy_id / 8;
+    erpc::rt_assert(next_shard_idx <= zk_session_nums.size()+1, "next shard idx too big\n");
+    size_t ret = 1000;
+    try {ret = cid_to_shard.at(cid);}
+    catch (std::out_of_range &) {
+      cid_to_shard[cid] = next_shard_idx++;
+      ret = cid_to_shard[cid];
+    }
+    for (auto pair : cid_to_shard) {
+      auto i = pair.second;
+      int count = 0;
+      for (auto pair1 : cid_to_shard) {
+        if (i == pair1.second) {
+          count++;
+          erpc::rt_assert(count <= 1, "duplicate idx");
+        }
+      }
+    }
+    return ret;
+
+  }
+  // takes n, but this should be the number of shards
+  // there are nsequence_spaces shards == (nphys machines/3) * N_ZKTHREADS shards
+  size_t znode_to_shard_idx(std::string name) {
+    return std::hash<std::string>{}(name) % zk_session_nums.size();
+  }
+
   bool in_snapshot_requests_map(size_t rpc) {
     auto it = snapshot_requests.find(rpc);
     return it != snapshot_requests.end();
@@ -1115,7 +1196,6 @@ class WorkerContext : public ThreadContext {
   }
 
   WorkerContext() {
-    // Make room for seq, backup, dt0-2, nextpx, nextpx, replica_1, replica_2, client (maybe)
     session_num_vec.resize(16);
     my_ip = FLAGS_my_ip;
 
@@ -1251,40 +1331,26 @@ template<class Archive>
 // took a version
 void Proxy::serialize(Archive &ar, const unsigned int) {
   if (Archive::is_saving::value) c->check_gc_timer();
-
   ar & last_included_term;
   ar & last_included_index;
-
   ar & proxy_id;
-
   ar & max_received_seqnum;
   ar & highest_seen_seqnum;
-
   ar & batch_counter;
   ar & op_counter;
-
-  // For client ops once they have sequence numbers
   ar & seq_req_id;
-
+  // todo these calls were for testing
+  //  remove and retest when the machines are available...
   if (Archive::is_saving::value) c->check_gc_timer();
   ar & deleted_seq_req_ids;
-
   if (Archive::is_saving::value) c->check_gc_timer();
-
-  // prim map
   ar & last_ackd_crid;
   ar & highest_sequenced_crid;
   ar & highest_del_seq_req_id;
-
   if (Archive::is_saving::value) c->check_gc_timer();
-
-
-  // used in raft to make sure don't try to become leader too early
   ar & got_leader;
-
   ar & need_seqnum_batch_map;
   if (Archive::is_saving::value) c->check_gc_timer();
-
   ar & done_batch_map;
   if (Archive::is_saving::value) c->check_gc_timer();
   ar & client_retx_done_map;
@@ -1299,19 +1365,16 @@ void Proxy::serialize(Archive &ar, const unsigned int) {
   if (Archive::is_saving::value) c->check_gc_timer();
   ar & dummy_entry_response;
   if (Archive::is_saving::value) c->check_gc_timer();
-
   // could split this into two function save() and load() via Boost
   for (size_t i = 0; i < nsequence_spaces; i++) {
     if (Archive::is_saving::value) {
       received_seqnums[i] = c->received_ms_seqnums[i];
       ar & received_seqnums[i];
-    } else {
+    } else { // deserializing
       ar & received_seqnums[i];
     }
   }
-
   if (Archive::is_saving::value) c->check_gc_timer();
-
 }
 
 // 1. Figure out which request_ids are missing, i.e., have not been replicated
@@ -1330,6 +1393,7 @@ void Proxy::gain_leadership() {
   // we also shouldn't accept client request while we are still becoming the
   // leader
   gaining_leadership = true;
+
   init_timers();
   if (current_batch != nullptr && current_batch->batch_size() != 0) {
     complete_and_send_current_batch();
@@ -1341,7 +1405,7 @@ void Proxy::gain_leadership() {
               "regaining leadership\n", proxy_id);
   }
   LOG_ERROR("PID: %d starting from batch id %zu\n",
-      proxy_id, current_batch->batch_id);
+            proxy_id, current_batch->batch_id);
 
   auto start = erpc::rdtsc();
   // Replicate dummy entry to commit requests from previous terms in case of
@@ -1357,7 +1421,7 @@ void Proxy::gain_leadership() {
   }
 
   LOG_ERROR("PID: %u time to replicate dummy %Lf\n", proxy_id,
-         cycles_to_usec(erpc::rdtsc() - start));
+            cycles_to_usec(erpc::rdtsc() - start));
   debug_print(1, "applied dummy\n");
   LOG_ERROR("PID: %d scanning through appended_batch_map\n", proxy_id);
 
@@ -1376,6 +1440,8 @@ void Proxy::gain_leadership() {
             "Max used srid is %zu\n",
             proxy_id, appended_srids.size(), seq_req_id - 1);
 
+  // can probably improve performance by just having these arrays go from
+  // highest_del_seq_req_id to seq_req_id... rather than from 1.
   std::vector<size_t> incomplete_srids(seq_req_id - 1 - highest_del_seq_req_id);
   // we know everything up to and including highest_del_seq_req_id is done.
   std::iota(incomplete_srids.begin(), incomplete_srids.end(),
@@ -1396,8 +1462,8 @@ void Proxy::gain_leadership() {
   int dsrid_p = done_srids.size();
 
   LOG_ERROR("PID %d: highest_del_seq_req_id %zu top (0 if empty) %zu\n",
-              proxy_id, highest_del_seq_req_id,
-              !deleted_seq_req_ids.empty() ? deleted_seq_req_ids.top() : 0);
+            proxy_id, highest_del_seq_req_id,
+            !deleted_seq_req_ids.empty() ? deleted_seq_req_ids.top() : 0);
   // you can't iterate over pqueues
   // take them out, add to done_srids
   // the srids we deleted will not be in the done map
@@ -1430,7 +1496,7 @@ void Proxy::gain_leadership() {
   std::set_difference(incomplete_srids.begin(), incomplete_srids.end(),
                       done_srids.begin(), done_srids.end(),
                       std::back_inserter(diff));
-  std::sort(diff.begin(), diff.end()); // should already be sorted?
+  std::sort(diff.begin(), diff.end());
   std::set_difference(diff.begin(), diff.end(),
                       appended_srids.begin(), appended_srids.end(),
                       std::back_inserter(missing_srids));
@@ -1443,8 +1509,6 @@ void Proxy::gain_leadership() {
   // Request the missing seq_req_ids from the sequencer; these will be noops
   // The batch size will be set later, when the response from the sequencer
   // comes back.
-  //  It (should depending on current batch) will assign 0 seq nums and
-  //  respond with batch size 0 seq_num 0.
   for (size_t i : missing_srids) {
     current_batch->seq_req_id = i;
     debug_print(1, "%zu requesting missing srid %zu\n", c->thread_id, i);
@@ -1469,9 +1533,7 @@ void Proxy::gain_leadership() {
 
 inline void
 Batch::free() {
-  debug_print(DEBUG_SEQ, "Freeing batch %lu\n", batch_id);
   for (auto op : batch_client_ops) {
-    debug_print(DEBUG_SEQ, "Freeing op %lu\n", op->local_reqid);
     op->free();
   }
   batch_client_ops.clear();
@@ -1484,6 +1546,7 @@ Proxy::Proxy() {
   received_seqnums = new Bitmap *[nsequence_spaces];
 }
 
+// Constructor
 Proxy::Proxy(WorkerContext *ctx, bool a, int p) {
   c = ctx;
   am_leader = a;
@@ -1530,6 +1593,7 @@ Proxy::Proxy(WorkerContext *ctx, bool a, int p) {
   fflush(stdout);
 }
 
+// todo unused remove
 void
 Proxy::deserial_proxy(WorkerContext *ctx, bool a, int p) {
   c = ctx;
@@ -1564,14 +1628,14 @@ Tag::alloc_msgbufs(WorkerContext *c, Batch *batch, bool failover) {
   this->batch_id = batch->batch_id;
   this->failover = failover;
 
-  size_t bufsize = std::max(
-      sequencer_payload_size(nsequence_spaces),
-      client_payload_size(nsequence_spaces));
+  size_t bufsize = kMaxStaticMsgSize;
 
   if (!msgbufs_allocated) {
 #if !NO_ERPC
+
     req_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
-    resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
+    resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(kMaxGetChildrenSize +
+        sizeof(client_payload_t));
 #else
     req_msgbuf = new char[bufsize];
     resp_msgbuf = new char[bufsize];
@@ -1580,14 +1644,42 @@ Tag::alloc_msgbufs(WorkerContext *c, Batch *batch, bool failover) {
   }
 }
 
-Tag::~Tag() {
+// only used for client operations
+inline void
+Tag::alloc_msgbufs(WorkerContext *_c) {
+  this->c = _c;
+
+  // should be max of all structs we might use this tag for
+  // because we only allocate them once
+  // this bufsize is something the application needs to tell us
+  size_t bufsize = kMaxStaticMsgSize;
+  if (msgbufs_allocated) {
+    c->rpc->free_msg_buffer(req_msgbuf);
+    c->rpc->free_msg_buffer(resp_msgbuf);
+    msgbufs_allocated = false;
+  }
+
+  if (!msgbufs_allocated) {
 #if !NO_ERPC
-  c->rpc->free_msg_buffer(req_msgbuf);
-  c->rpc->free_msg_buffer(resp_msgbuf);
+
+    uint64_t tmp = c->proxies.begin()->second->tag_pool.num_to_alloc;
+    uint64_t size = 0;
+    while (tmp != 0) {tmp/=2;size+=tmp;}
+    req_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
+    resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(//bufsize);
+       kMaxGetChildrenSize + sizeof(client_payload_t));
+   erpc::rt_assert(req_msgbuf.buf != nullptr && resp_msgbuf.buf != nullptr,
+                   "req or resp buf was null");
+   erpc::rt_assert(req_msgbuf.get_data_size() == kMaxStaticMsgSize,
+                   "req was incorrect size");
 #else
-  delete req_msgbuf;
-  delete resp_msgbuf;
+    req_msgbuf = new char[bufsize];
+    resp_msgbuf = new char[bufsize];
 #endif
+    msgbufs_allocated = true;
+  }
+  erpc::rt_assert(&req_msgbuf != nullptr && &resp_msgbuf != nullptr,
+                  "alloc_msgbuf req or resp_msgbuf is nullptr\n");
 }
 
 inline void
@@ -1600,7 +1692,7 @@ send_noop_to_client_cont_func(void *_c, void *_tag) {
   // there is only one request
   b->completed_ops++;
   LOG_FAILOVER("Received response of noop batch from client %zu %d\n",
-              b->batch_size(), b->completed_ops);
+               b->batch_size(), b->completed_ops);
 
   b->proxy->tag_pool.free(tag);
 
@@ -1612,8 +1704,9 @@ send_noop_to_client_cont_func(void *_c, void *_tag) {
 }
 
 inline void
-send_noop_to_client(Batch *batch, ClientOp *op)//, uint64_t seqnum)
+send_noop_to_client(Batch *batch, ClientOp *op)
 {
+  erpc::rt_assert(false, "zk not ready for noops");
   Proxy *proxy = batch->proxy;
   WorkerContext *c = batch->c;
 
@@ -1626,16 +1719,14 @@ send_noop_to_client(Batch *batch, ClientOp *op)//, uint64_t seqnum)
                   "Not connected to the client for writing noops!");
 
   c->rpc->resize_msg_buffer(&tag->req_msgbuf,
-                            client_payload_size(nsequence_spaces));
+                            client_payload_size());
   auto *payload =
       reinterpret_cast<client_payload_t *>(tag->req_msgbuf.buf);
 
   payload->reqtype = ReqType::kNoop;
+  printf("nooping the following seq_reqs:\n\t");
+  print_seqreqs(op->seq_reqs, nsequence_spaces);
 
-  copy_seq_reqs(payload->seq_reqs, op->seq_reqs);
-
-  LOG_ERROR("[%zu] sending noops to client\n", c->thread_id);
-  print_seqreqs(payload->seq_reqs, nsequence_spaces);
   c->rpc->enqueue_request(session_num,
                           static_cast<uint8_t>(ReqType::kRecordNoopSeqnum),
                           &tag->req_msgbuf, &tag->resp_msgbuf,
@@ -1643,8 +1734,67 @@ send_noop_to_client(Batch *batch, ClientOp *op)//, uint64_t seqnum)
                           reinterpret_cast<void *>(tag));
 }
 
-// Hacky but need to be able to run event loop over smaller timescales
-// This is currently broken for some reason.
+void ClientOp::set_seq_reqs() {
+  for (size_t i = 0; i < nsequence_spaces; i++) {
+    seq_reqs[i].seqnum = 0;
+    seq_reqs[i].batch_size = 0;
+  }
+
+  if (reqtype == ReqType::kCreateZNode) {
+    if (std::string(zk_payload.create_node.name) ==
+        std::string("/")) {
+      seq_reqs[c->znode_to_shard_idx("/")].batch_size++;
+    } else {
+      if (zk_payload.create_node.options == CreateNodeOptions::kEphemeral) {
+        // the client sets what shards we should ping
+        for (size_t i = 0; i < zk_payload.create_node.nshards; i++) {
+          seq_reqs[zk_payload.create_node.shards[i]].batch_size++;
+        }
+        seq_reqs[c->znode_to_shard_idx(zk_payload.create_node.name)].batch_size++;
+        seq_reqs[c->znode_to_shard_idx(get_parent(zk_payload.create_node.name))].batch_size++;
+      } else {
+        seq_reqs[c->znode_to_shard_idx(zk_payload.create_node.name)].batch_size++;
+        seq_reqs[c->znode_to_shard_idx(get_parent(zk_payload.create_node.name))].batch_size++;
+      }
+    }
+  } else if (reqtype == ReqType::kRenameZNode) {
+    if (std::string(zk_payload.rename_node.from) ==
+        std::string("/")) {
+      erpc::rt_assert(false, "cannot rename root node!\n");
+    } else {
+      // delete on from
+      seq_reqs[c->znode_to_shard_idx(zk_payload.rename_node.from)].batch_size++;
+      // rename on parent
+      seq_reqs[c->znode_to_shard_idx(get_parent(zk_payload.rename_node.from))].batch_size++;
+      // create on to
+      seq_reqs[c->znode_to_shard_idx(zk_payload.rename_node.to)].batch_size++;
+    }
+  } else if (reqtype == ReqType::kWriteZNode) {
+    seq_reqs[c->znode_to_shard_idx(zk_payload.write_node.name)].batch_size++;
+  } else if (reqtype == ReqType::kReadZNode) {
+    seq_reqs[c->znode_to_shard_idx(zk_payload.read_node.name)].batch_size++;
+  } else if (reqtype == ReqType::kDeleteZNode) {
+    seq_reqs[c->znode_to_shard_idx(zk_payload.delete_node.name)].batch_size++;
+    seq_reqs[c->znode_to_shard_idx(get_parent(zk_payload.delete_node.name))].batch_size++;
+  } else if (reqtype == ReqType::kExists) {
+    seq_reqs[c->znode_to_shard_idx(zk_payload.exists.name)].batch_size++;
+  } else if (reqtype == ReqType::kGetChildren) {
+    seq_reqs[c->znode_to_shard_idx(zk_payload.get_children.name)].batch_size++;
+  } else if (reqtype == ReqType::kDeleteClientConnection) {
+    for (size_t i = 0; i < zk_payload.delete_client_connection.nshards; i++) {
+      seq_reqs[zk_payload.delete_client_connection.shards[i]].batch_size++;
+      erpc::rt_assert(
+          seq_reqs[zk_payload.delete_client_connection.shards[
+              i]].batch_size <= 1, "Delete client connection > 1?\n");
+    }
+  }
+// remove before experiments
+  for (size_t i = 0; i < nsequence_spaces; i++) {
+    erpc::rt_assert(seq_reqs[i].batch_size <= 3,
+                    "in set_seq_reqs with batch size >3");
+  }
+}
+
 inline void
 run_event_loop_us(erpc::Rpc<erpc::CTransport> *rpc, size_t timeout_us) {
   size_t timeout_tsc = erpc::us_to_cycles(timeout_us, freq_ghz);
@@ -1664,7 +1814,6 @@ cycles_to_usec(uint64_t cycles) {
       static_cast<long double>(rte_get_tsc_hz())) * USEC_PER_SEC;
 }
 
-// this no longer really makes sense since one pid per thread
 inline std::string Proxy::p_string(void) {
   std::ostringstream ret;
   ret << "PID: " << proxy_id;

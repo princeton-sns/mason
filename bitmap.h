@@ -166,7 +166,7 @@ class Bitmap {
                base_seqnum + SEQNUMS_PER_BLOCK * nblocks - 1);
   }
 
-  void write_to_file() { //const char *file_name) {
+  void write_to_file() {
     FILE *file = fopen(f_name, "w");
     erpc::rt_assert(file != NULL, "Could not open file for bitmap\n");
     size_t n = 0;
@@ -179,7 +179,7 @@ class Bitmap {
 
   // does this need to free bitmap!?
   // assumes metadata is already set up
-  void read_from_file(const char *file_name) {//, size_t size) {
+  void read_from_file(const char *file_name) {
     size_t size = nblocks * BYTES_PER_BLOCK;
     erpc::rt_assert(
         nblocks * BYTES_PER_BLOCK == size, // todo don't need this anymore
