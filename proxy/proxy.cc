@@ -12,12 +12,10 @@ double freq_ghz;
 long int update_ackd_time = 0;
 
 // IP addresses for the other endpoints. All are global except for
-// nextproxy_ip; this is only for the "last" thread on this machine,
+// nextproxy_ip; this is only for the "last" thread on this machine, 
 // which will be passing its garbage along to another machine for collection.
 std::string my_ip;
-std::string nextproxy0_ip;
-std::string nextproxy1_ip;
-std::string nextproxy2_ip;
+std::string nextproxy_ip;
 std::string seq_ip;
 std::string backupseq_ip;
 std::string client_ip;
@@ -29,14 +27,15 @@ std::string replica_2_ip;
 
 std::vector<WorkerContext *> *context_vector;
 
-size_t nsequence_spaces;
-
 // Forward declarations
 static void request_seqnum_cont_func(void *, void *);
-static void submit_operation_cont_func(void *, void *);
 static void get_and_persist_deps_cont_func(void *, void *);
 static void persist_deps_cont_func(void *, void *);
 static void heartbeat_cont_func(void *, void *);
+
+// operation cont_funcs
+static void corfu_append_cont_func(void *, void *);
+static void corfu_read_cont_func(void *, void *);
 
 // Recovery handlers
 static void request_bitmap_handler(erpc::ReqHandle *, void *);
@@ -55,13 +54,13 @@ sm_handler(int session_num, erpc::SmEventType sm_event_type,
 
   erpc::rt_assert(
       sm_err_type == erpc::SmErrType::kNoError ||
-      session_num ==
-      c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)] ||
-      sm_event_type == erpc::SmEventType::kDisconnected,
+          session_num
+              == c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)] ||
+          sm_event_type == erpc::SmEventType::kDisconnected,
       "Got a SM error: " + erpc::sm_err_type_str(sm_err_type));
 
   if (!(sm_event_type == erpc::SmEventType::kConnected ||
-        sm_event_type == erpc::SmEventType::kDisconnected)) {
+      sm_event_type == erpc::SmEventType::kDisconnected)) {
     throw std::runtime_error("Unexpected SM event!");
   }
 
@@ -74,42 +73,16 @@ sm_handler(int session_num, erpc::SmEventType sm_event_type,
   }
 }
 
-void print_waiting_batch(Proxy *p) {
-  auto bid = p->highest_cons_batch_id + 1;
-  if (!p->in_done_batch_map(bid)) return;
-
-  Batch *b = p->done_batch_map[bid];
-
-  fmt_rt_assert(b->batch_size() != 0,
-      "PID: %d waiting for bid %zu with size 0?",
-      p->proxy_id, b->batch_id);
-
-  char line[1024]; memset(line, '\0', 1024);
-  sprintf(line, "bid %zu waiting for:", b->batch_id);
-  bool found = false;
-  for (auto first : b->acked_ops) {
-    if (!b->acked_ops[first.first]) {
-      found = true;
-      sprintf(line+strlen(line), "\n\tcid %u crid %zu",
-              first.first.first, first.first.second);
-    }
-  }
-
-  printf("hcbid+1: %s\n", line);
-  fmt_rt_assert(found, "PID: %d all ops in waiting batch were acked!?\n\t"
-                       "bid %d batch size %zu acked_ops size %zu",
-      p->proxy_id, b->batch_id, b->batch_size(), b->acked_ops.size());
-}
-
 // Lifted (almost) verbatim from erpc code:
 // https://github.com/erpc-io/eRPC/blob/master/apps/small_rpc_tput/small_rpc_tput.cc
+// todo add printing of raft stats (how far behind...)
 static inline void
 print_stats(void *_c) {
 #if PRINT_TIMING
   auto start = erpc::get_formatted_time();
 #endif
 
-  auto *c = reinterpret_cast<WorkerContext *>(_c);
+  WorkerContext *c = reinterpret_cast<WorkerContext *>(_c);
 
   double seconds = erpc::sec_since(c->tput_t0);
 
@@ -147,17 +120,27 @@ print_stats(void *_c) {
     LOG_INFO(
         "Thread %zu: %.3f Mrps, re_tx = %zu, still_in_wheel = %zu. "
         "RX: %zu resps. Latency: %s. Avg. Batch Size: %f AE pkts_s: %f AE bytes_s: %f\n",
-        c->thread_id, tput_mrps, c->app_stats[c->thread_id].num_re_tx,
+        c->thread_id,
+        tput_mrps,
+        c->app_stats[c->thread_id].num_re_tx,
         c->rpc->pkt_loss_stats.still_in_wheel_during_retx,
-        c->stat_resp_tx_tot, lat_stat, c->avg_batch_size, ae_pkts_per_sec,
+        c->stat_resp_tx_tot,
+        lat_stat,
+        c->avg_batch_size,
+        ae_pkts_per_sec,
         ae_bytes_per_sec);
   } else {
     LOG_INFO(
         "Thread %zu: %.3f Mrps, re_tx = %zu, still_in_wheel = %zu. "
         "RX: %zu resps. Latency: %s. Avg. Batch Size: %f AE pkts_s: %f AE bytes_s: %f\n",
-        c->thread_id, tput_mrps, c->app_stats[c->thread_id].num_re_tx,
+        c->thread_id,
+        tput_mrps,
+        c->app_stats[c->thread_id].num_re_tx,
         static_cast<size_t>(0),
-        c->stat_resp_tx_tot, lat_stat, c->avg_batch_size, ae_pkts_per_sec,
+        c->stat_resp_tx_tot,
+        lat_stat,
+        c->avg_batch_size,
+        ae_pkts_per_sec,
         ae_bytes_per_sec);
   }
 
@@ -175,20 +158,14 @@ print_stats(void *_c) {
     LOG_INFO("TOTAL: %s\n\n", accum.to_string().c_str());
   }
 
-  std::string line("base seqnums ");
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    line += std::to_string(c->received_ms_seqnums[i]->base_seqnum) + " ";
-  }
-  LOG_INFO("%s\n", line.c_str());
-
   for (auto &el : c->proxies) {
     Proxy *proxy = el.second;
-    LOG_INFO("Logical Proxy %u\n", proxy->proxy_id);
+    LOG_INFO("[%s] Logical Proxy %u\n",
+             erpc::get_formatted_time().c_str(), proxy->proxy_id);
     LOG_INFO("\tis proxy_id: %d node_id %d the leader?: %d the leader is: %d\n",
              proxy->proxy_id, proxy->replica_data[my_raft_id].node_id,
              raft_is_leader(proxy->raft), raft_get_current_leader(proxy->raft));
-    LOG_INFO("\tmax_received_seqnums: %lu\n", proxy->max_received_seqnum);
-
+    LOG_INFO("\tmax_received_seqnum: %lu\n", proxy->max_received_seqnum);
 
     auto *raft_p = reinterpret_cast<raft_server_private_t *>(proxy->raft);
 
@@ -214,8 +191,10 @@ print_stats(void *_c) {
              "\n\t crdm %ld"
              "\n\t cripm %ld"
              "\n\t owh %ld"
+             //                "\n\t cops %ld"
              "\n\t dbids %ld"
              "\n\t deleted_seq_req_ids %ld"
+             "\n\t bitmap %lu"
              "\n",
              proxy->last_ackd_crid.size(),
              proxy->appended_batch_map.size(),
@@ -225,34 +204,25 @@ print_stats(void *_c) {
              proxy->client_retx_in_progress_map.size(),
              proxy->ops_with_handles.size(),
              proxy->done_batch_ids.size(),
-             proxy->deleted_seq_req_ids.size());
-    LOG_INFO("highest_del_seq_req_id %zu\n", proxy->highest_del_seq_req_id);
-    LOG_INFO("bitmaps\n");
-    for (size_t i = 0; i < nsequence_spaces; i++) {
-      LOG_INFO("\t sequence space %zu cap: %zu\n", i,
-               proxy->c->received_ms_seqnums[i]->capacity());
+             proxy->deleted_seq_req_ids.size(),
+             proxy->c->received_seqnums->capacity());
+    LOG_INFO("crdmp ");
+    for (auto pair : proxy->client_retx_done_map) {
+      LOG_INFO(" %ld ", pair.second.size());
     }
-    line.clear();
-    line += "client_retx_done_map ";
-    for (auto const &pair : proxy->client_retx_done_map) {
-      line += " count " + std::to_string(pair.second.size()) + " (b) " +
-          std::to_string(pair.second.size() * sizeof(ClientOp));
-    }
-    LOG_INFO("%s\n", line.c_str());
+    LOG_INFO("\n");
 
-    line.clear();
-    line += "client_retx_in_progress_map ";
-    for (auto const &pair : proxy->client_retx_in_progress_map) {
-      line += " " + std::to_string(pair.second.size());
+    LOG_INFO("cripmp ");
+    for (auto pair : proxy->client_retx_in_progress_map) {
+      LOG_INFO(" %ld", pair.second.size());
     }
-    LOG_INFO("%s\n", line.c_str());
+    LOG_INFO("\n");
 
-    line.clear();
-    line += "ops_with_handles ";
-    for (auto const &pair : proxy->ops_with_handles) {
-      line += " " + std::to_string(pair.second.size());
+    LOG_INFO("owh ");
+    for (auto pair : proxy->ops_with_handles) {
+      LOG_INFO(" %ld", pair.second.size());
     }
-    LOG_INFO("%s\n", line.c_str());
+    LOG_INFO("\n");
   }
 
   LOG_INFO("total update_ackd time %ld\n", update_ackd_time);
@@ -280,7 +250,7 @@ print_stats(void *_c) {
 
 inline void
 send_heartbeat(void *_c) {
-  auto *c = reinterpret_cast<WorkerContext *>(_c);
+  WorkerContext *c = reinterpret_cast<WorkerContext *>(_c);
 
   if (c->in_recovery) {
     c->stop_heartbeat_timer();
@@ -292,13 +262,14 @@ send_heartbeat(void *_c) {
   batch->reset(c, proxy, 0, 0);
 
   Tag *tag = proxy->tag_pool.alloc();
-  tag->alloc_msgbufs(c, batch, false);
+  tag->alloc_msgbufs(c, batch, 0);
 
   LOG_SEQ("[%zu] Sending heartbeat to sequencer, tag %p...\n",
           c->thread_id,
           static_cast<void *>(tag));
 
-  uint8_t session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
+  uint8_t
+      session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
 
   c->rpc->enqueue_request(session_num,
                           static_cast<uint8_t>(ReqType::kHeartbeat),
@@ -322,11 +293,12 @@ send_heartbeat(void *_c) {
 inline void
 heartbeat_cont_func(void *_c, void *_tag) {
   // Reset the timer
-  auto *c = reinterpret_cast<WorkerContext *>(_c);
+  WorkerContext *c = reinterpret_cast<WorkerContext *>(_c);
   Tag *tag = reinterpret_cast<Tag *>(_tag);
   Batch *b = tag->batch;
 
   if (tag->resp_msgbuf.get_data_size() == 0) {
+    // Failed continuation!
     b->proxy->tag_pool.free(tag);
     b->proxy->batch_pool.free(b);
     return;
@@ -344,21 +316,52 @@ heartbeat_cont_func(void *_c, void *_tag) {
       "[%zu] Heartbeat cont func done!\n", c->thread_id);
 }
 
-
 inline void
 reply_not_leader(erpc::ReqHandle *req_handle,
                  uint16_t pid, uint16_t cid, client_reqid_t crid, Proxy *p) {
   p->c->rpc->resize_msg_buffer(
-      &req_handle->pre_resp_msgbuf, client_payload_size(nsequence_spaces));
+      &req_handle->pre_resp_msgbuf, sizeof(client_payload_t));
 
   auto *payload = reinterpret_cast<client_payload_t *>(
       req_handle->pre_resp_msgbuf.buf);
   payload->proxy_id = pid;
   payload->client_id = cid;
   payload->client_reqid = crid;
+  payload->seqnum = 0;
   payload->not_leader = true;
 
   p->c->rpc->enqueue_response(req_handle, &req_handle->pre_resp_msgbuf);
+}
+
+/* Service stubs can execute code on the proxy without sequencing
+ * e.g. reads of a specific log position.
+ */
+// for now we are not executing in batches, just simple read and return
+void corfu_read_handler(erpc::ReqHandle *req_handle, void *_context) {
+  auto *c = static_cast<WorkerContext *>(_context);
+  const erpc::MsgBuffer *req_msgbuf = req_handle->get_req_msgbuf();
+  auto *request = reinterpret_cast<client_payload_t *>(req_msgbuf->buf);
+
+  fmt_rt_assert(c->in_proxies_map(request->proxy_id),
+                "I do not manage the proxy_id this client (id: %u)"
+                " sent to! proxy_sent: %d\n",
+                request->client_id,
+                request->proxy_id);
+
+  Proxy *proxy = c->proxies[request->proxy_id];
+
+  ClientOp *op = proxy->client_op_pool.alloc();
+  op->populate(request->reqtype,
+               request->client_id,
+               request->client_reqid,
+               request->proxy_id,
+               req_handle,
+               proxy->op_counter++,
+               proxy,
+               proxy->c);
+  op->seqnum = request->seqnum; // the log position to read at
+
+  op->submit_operation();
 }
 
 // this function is slow...
@@ -366,7 +369,7 @@ void
 Proxy::update_ackd_reqids(uint16_t cid, int64_t ackd_crid) {
   // doesn't execute if it's a re-ack
   if (unlikely(!in_last_acked_map(cid))) {
-    LOG_ERROR("client was not in map\n");
+    LOG_COMPACTION("client was not in map\n");
     last_ackd_crid[cid] = -1;
   }
   // if ackd_crid is -1, last_ackd_crid is -1, so shouldn't execute
@@ -376,6 +379,7 @@ Proxy::update_ackd_reqids(uint16_t cid, int64_t ackd_crid) {
     ClientOp *cop = nullptr;
     if (!(cop = in_client_retx_done_map(cid, i))) {
       if (!(cop = in_in_progress_map(cid, i))) {
+        // not in either map?
         continue;
       }
     }
@@ -388,9 +392,6 @@ Proxy::update_ackd_reqids(uint16_t cid, int64_t ackd_crid) {
       push_and_update_highest_cons_batch_id(b->batch_id);
     }
   }
-
-   LOG_COMPACTION("got ack for cid %u rid %ld, updated highest_cons_bid %zu\n",
-           cid, ackd_crid, highest_cons_batch_id);
 
   // there could be reordering
   if (likely(ackd_crid > last_ackd_crid[cid])) {
@@ -406,32 +407,36 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
   auto *c = static_cast<WorkerContext *>(_context);
 
   const erpc::MsgBuffer *req_msgbuf = req_handle->get_req_msgbuf();
-  erpc::rt_assert(req_msgbuf->get_data_size() ==
-                  client_payload_size(
-                      nsequence_spaces),
+  erpc::rt_assert(req_msgbuf->get_data_size() == sizeof(client_payload_t),
                   "Payload from client is the wrong size!\n");
 
   auto *request = reinterpret_cast<client_payload_t *>(req_msgbuf->buf);
 
+  LOG_THREAD("Got a request for proxy %u\n", request->proxy_id);
+
   fmt_rt_assert(c->in_proxies_map(request->proxy_id),
                 "I do not manage the proxy_id this client (id: %u)"
-                " sent to! proxy_sent: %d\n", request->client_id,
+                " sent to! proxy_sent: %d\n",
+                request->client_id,
                 request->proxy_id);
 
   Proxy *proxy = c->proxies[request->proxy_id];
 
-  if (unlikely(!raft_is_leader(proxy->raft)) || proxy->gaining_leadership) {
-    LOG_FAILOVER("I am not the leader (or gaining leadership) for the proxy_id "
+  LOG_FAILOVER("Proxy %d Got an op from %d, id %ld sent to proxy_id %d!\n",
+               proxy->proxy_id,
+               request->client_id,
+               request->client_reqid,
+               request->proxy_id);
+
+  if (unlikely(!raft_is_leader(proxy->raft))) {
+    // we are not the leader for this proxy_id, we should not process this request
+    LOG_FAILOVER("I am not the leader for the proxy_id "
                  "this client sent to! proxy_sent: %d\n", request->proxy_id);
     reply_not_leader(req_handle, request->proxy_id,
                      request->client_id, request->client_reqid, proxy);
     return;
   }
 
-  //  the recovery protocol. this may be part of the issue.
-  //  (I wait for dummy entry to commit and receive client requests before
-  //  it commits)
-  //  partially solved by replying not leader above
   // it always safe to act on ack'd client requests if I'm the leader
   // always update, could maintain a var that maintains last ack'd to see if need to update
   //  but we are unlikely to repeat very often due to eRPC guarantees
@@ -447,10 +452,10 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
       request->client_id, request->client_reqid))) {
     // this is a retransmit the follower (now leader) has and is working on. ignore
     // add resp_handler to the op in the batch so that we can reply when it finishes
-    ClientOp *op = proxy->client_retx_in_progress_map
-    [request->client_id][request->client_reqid];
+    ClientOp *op = proxy->client_retx_in_progress_map[
+        request->client_id][request->client_reqid];
 
-    LOG_FAILOVER("pid: %u client_id %d op %lu "
+    LOG_FAILOVER("pid: %lu client_id %lu op %lu "
                  "is in progress in batch_id %lu\n",
                  proxy->proxy_id, op->client_id, op->client_reqid,
                  op->batch->batch_id);
@@ -458,8 +463,9 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
     if (op->has_handle) {
       // shouldn't ever happen
       LOG_FAILOVER("in in progress map got a retx with an op "
-                   "that already has a handle: client_id %d op %ld\n",
+                   "that already has a handle: client_id %d op %d\n",
                    request->client_id, request->client_reqid);
+      // already have a handle, ignore
       return;
     }
 
@@ -469,7 +475,9 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
     if (op->committed) {
       op->submit_operation();
     }
+
     proxy->ops_with_handles[op->client_id][op->client_reqid] = op;
+
     return;
   }
 
@@ -485,8 +493,10 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
                                    "already has a handle: client_id %d op %d\n",
                   request->client_id, request->client_reqid);
 
-    proxy->client_retx_done_map[request->client_id].erase(
-        request->client_reqid);
+    // I don't think we need to actually be erasing this???
+    // todo removing now is ok for our clients, but is incorrect when the clients
+    //  can send requests for old ids arbitrarily...
+    proxy->client_retx_done_map[request->client_id].erase(request->client_reqid);
 
     // we don't add to has_handle map sicne it will be removed in respond_to_client
     op->has_handle = true;
@@ -496,28 +506,33 @@ client_op_handler(erpc::ReqHandle *req_handle, void *_context) {
   }
 
   /* If here we are the leader and haven't seen this op before.
-  * For FIFO ordering, we need to put each client request into a per-client queue
-  * ordered by client_reqid. Each time we hear back from the sequencer, we can
-  * put into a batch the next set of consecutive operations for each client.
-  */
+   * For FIFO ordering, we need to put each client request into a per-client queue
+   * ordered by client_reqid. Each time we hear back from the sequencer, we can
+   * put into a batch the next set of consecutive operations for each client.
+   */
   /* If we're the leader, we've either inherited the client_reqid history
    * from the previous leader or we've never seen anything from this
    * client before.
    */
   ClientOp *op = proxy->client_op_pool.alloc();
-  op->populate(request->reqtype, request->client_id, request->client_reqid,
-               request->proxy_id, req_handle, proxy->op_counter++, proxy,
-               request->seq_reqs);
-  if (false) { //proxy->gaining_leadership) {
-    proxy->enqueue_op(op);
-  } else {
-    proxy->enqueue_or_add_to_batch(op);
-  }
+  LOG_DT("Got an op from %d, id %ld!\n", request->client_id,
+         request->client_reqid);
+  op->populate(request->reqtype,
+               request->client_id,
+               request->client_reqid,
+               request->proxy_id,
+               req_handle,
+               proxy->op_counter++,
+               proxy,
+               proxy->c);
+  memcpy(op->entry_val, request->entry_val, MAX_CORFU_ENTRY_SIZE);
+  proxy->enqueue_or_add_to_batch(op);
 
   // add to map we need to maintain for acking requests...
   // This can be done now even if the op isn't added to a batch; it would
   // be equivalent to the batch getting delayed en route to sequencer.
-  proxy->client_retx_in_progress_map[request->client_id][request->client_reqid] = op;
+  proxy->client_retx_in_progress_map[request->client_id][request->client_reqid] =
+      op;
 
 #if PRINT_TIMING
   printf("[%s] client_op_handler [%s]\n", start.c_str(), erpc::get_formatted_time().c_str());
@@ -529,20 +544,17 @@ inline void
 Batch::populate_seqnum_request_buffer(Tag *tag) {
 #if !NO_ERPC
   c->rpc->resize_msg_buffer(
-      &tag->req_msgbuf, sequencer_payload_size(nsequence_spaces));
-  auto *payload = reinterpret_cast<payload_t *>(tag->req_msgbuf.buf);
+      &tag->req_msgbuf, sizeof(payload_t));
+  payload_t *payload = reinterpret_cast<payload_t *>(tag->req_msgbuf.buf);
 #else
   payload_t *payload = reinterpret_cast<payload_t *>(tag->req_msgbuf);
 #endif
 
   payload->proxy_id = proxy_id;
   payload->batch_id = batch_id;
+  payload->batch_size = batch_size();
   payload->seq_req_id = seq_req_id;
   payload->retx = false;
-
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    payload->seq_reqs[i].batch_size = seq_reqs[i].batch_size;
-  }
 }
 
 // Contact sequencer for a batch of seqnums
@@ -566,18 +578,12 @@ Batch::request_seqnum(bool failover) {
   tag->alloc_msgbufs(c, this, failover);
   populate_seqnum_request_buffer(tag);
 
-  erpc::rt_assert(!failover || batch_size() == 0,
-                  "there are client ops in a failover batch\n");
-
-  uint8_t session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
+  uint8_t
+      session_num = c->session_num_vec[static_cast<uint8_t>(MachineIdx::SEQ)];
 
   // For recovery: record batch as a potential hole before
   // sending request to the sequencer
   recovery_tag = tag;
-
-  LOG_SEQ("Requesting seq num batch_id %zu batch addr %p tag %p\n",
-          batch_id, reinterpret_cast<void *>(tag->batch),
-          reinterpret_cast<void *>(tag));
 
   c->rpc->enqueue_request(session_num,
                           static_cast<uint8_t>(ReqType::kGetSeqNum),
@@ -589,7 +595,6 @@ Batch::request_seqnum(bool failover) {
 #endif
 }
 
-// TODO: this does not contain a check if it is from the old sequencer!!!!!
 // Get the seqnum and update the proxy's max_received_seqnum. Start piggyback
 // timer in case no new requests come in.
 inline void
@@ -599,15 +604,16 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   auto start = erpc::get_formatted_time();
 #endif
 
-  auto *c = reinterpret_cast<WorkerContext *>(_context);
+  WorkerContext *c = reinterpret_cast<WorkerContext *>(_context);
   auto tag = static_cast<Tag *>(_tag);
   Batch *b = tag->batch;
   Proxy *proxy = b->proxy;
 
   if (tag->resp_msgbuf.get_data_size() == 0) {
     // Failed continuation! The batch will have been saved in the outstanding
-    // batch map. Free tag and return.
-    // LOG_RECOVERY("Empty continuation from sequencer!\n");
+    // batch array. Free tag and return.
+    LOG_RECOVERY("Empty continuation!\n");
+    LOG_RECOVERY("Freed tag!\n"); // todo is it actually freed?
     return;
   }
 
@@ -616,32 +622,25 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   c->heartbeat_last_call = false;
 
 #if !NO_ERPC
-  auto *payload = reinterpret_cast<payload_t *>(tag->resp_msgbuf.buf);
+  payload_t *payload = reinterpret_cast<payload_t *>(tag->resp_msgbuf.buf);
 #else
   payload_t *payload = reinterpret_cast<payload_t *>(tag->resp_msgbuf);
 #endif
 
   if (!raft_is_leader(b->proxy->raft)) {
     // I am no longer the leader for a seqnum that I requested, don't do anything
-    debug_print(1, "[%zu] Not the leader!\n", c->thread_id);
+    LOG_ERROR("[%zu] Not the leader! Seqnum %zu\n",
+              c->thread_id, payload->seqnum);
     return;
   }
 
   // This proxy is the leader for its group.
-  LOG_SEQ("[%zu] received_seqnums\n", c->thread_id);
-  if (LOG_DEBUG_SEQ) print_seqreqs(payload->seq_reqs, nsequence_spaces);
+  LOG_SEQ("[%lu] received seqnum %lu\n", c->thread_id, payload->seqnum);
   // Make sure we got the right response...
   if (payload->batch_id != b->batch_id) {
-    // LOG_DT("Expected %zu, got %zu. Batch addr %p, tag %p\n",
-    //             b->batch_id, payload->batch_id, b, tag);
   }
-
-  LOG_SEQ("Thread %lu: Got seqnums for batch_id %lu "
-          "seq_req_id %lu reqtype of [0] %u retx %d\n",
-          b->proxy->c->thread_id,
-          b->batch_id, b->seq_req_id,
-          static_cast<uint8_t>(b->batch_client_ops[0]->reqtype), payload->retx);
-  if (DEBUG_SEQ) print_seqreqs(payload->seq_reqs, nsequence_spaces);
+  erpc::rt_assert(payload->batch_id == b->batch_id,
+                  "Got a seqnum response for another batch");
 
   // Make sure we got the right response...
   fmt_rt_assert(payload->batch_id == b->batch_id,
@@ -649,64 +648,51 @@ request_seqnum_cont_func(void *_context, void *_tag) {
                 "Expected %zu, got %zu. Batch addr %p, tag %p\n",
                 b->batch_id, payload->batch_id, b, tag);
 
-  if (unlikely(tag->failover)) {
-    debug_print(1, "We've failed over!\n");
-    printf(
-        "received a response for a previous srid nops (should be 0) == %zu\n",
-        tag->batch->batch_size());
-    fflush(stdout);
-    erpc::rt_assert(tag->batch->batch_size() == 0,
-                    "failover batch size not 0 in noop batch\n");
+  LOG_SEQ("Thread %lu: Got seqnum %lu for batch_id %zu "
+          "seq_req_id %lu, size %zu, payload size %d\n",
+          b->proxy->c->thread_id, payload->seqnum,
+          b->batch_id, b->seq_req_id, b->batch_size(),
+          payload->batch_size);
 
-    ClientOp *op = proxy->client_op_pool.alloc();
-    op->populate(ReqType::kNoop, UINT16_MAX, INT64_MAX,
-                 proxy->proxy_id, nullptr, proxy->op_counter++, proxy);
-    // make it so that it is like 1 client getting all the numbers...
-    // this is so the followers add the seqnums to their bitmaps
-    copy_seq_reqs(op->seq_reqs, payload->seq_reqs);
-    // all the seq_reqs should be 0 at this point in the batch before we
-    // add to the batch
-    print_seqreqs(b->seq_reqs, nsequence_spaces);
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      erpc::rt_assert(b->seq_reqs[j].seqnum == 0,
-                      "seqnum not zero in empty noop batch\n");
-      erpc::rt_assert(b->seq_reqs[j].batch_size == 0,
-                      "batch_size not zero in empty noop batch\n");
+  if (unlikely(tag->failover)) {
+    LOG_ERROR("We've failed over!\n");
+    for (size_t i = 0; i < payload->batch_size; i++) {
+      ClientOp *op = proxy->client_op_pool.alloc();
+      op->populate(ReqType::kNoop,
+                   UINT16_MAX,
+                   INT64_MAX,
+                   proxy->proxy_id,
+                   nullptr,
+                   proxy->op_counter++,
+                   proxy,
+                   proxy->c);
+      proxy->add_op_to_batch(op, b);
     }
-    proxy->add_op_to_batch(op, b);
   } else if (unlikely(payload->retx)) {
-    // a retx for a "future" srid
-    LOG_ERROR("[%u] It's a retx, batch_id %zu, "
-                   "seq_req_id %zu!\n", proxy->proxy_id, b->batch_id, b->seq_req_id);
-    print_seqreqs(payload->seq_reqs, nsequence_spaces);
-    // This seqnum must be nooped; a different leader requested this!
+    LOG_ERROR("It's a retx, batch size %d, batch_id %zu, " "seq_req_id %zu!\n",
+              payload->batch_size, b->batch_id, b->seq_req_id);
+
+    // This seqnum must go to a noop; a different leader requested this!
     // We must re-request a sequence number for ops in this
     // batch. Put these ops in the current batch, replace with noops.
-    for (auto op : b->batch_client_ops) {
-      proxy->add_op_to_batch(op); // change name to current_batch?
+    for (size_t i = 0; i < b->batch_size(); i++) {
+      ClientOp *op = b->batch_client_ops[i];
+      proxy->add_op_to_batch(op);
     }
     b->batch_client_ops.clear();
 
-    ClientOp *op = proxy->client_op_pool.alloc();
-    op->populate(ReqType::kNoop, UINT16_MAX, INT64_MAX,
-                 proxy->proxy_id, nullptr, proxy->op_counter++, proxy);
-
-    // make it so that it is like 1 client getting all the numbers...
-    // this is so the followers add the seqnums to their bitmaps
-    copy_seq_reqs(op->seq_reqs, payload->seq_reqs);
-    // all the seq_reqs should be 0 at this point in the batch before we
-    // add to the batch
-    // empty seq_reqs after adding the client which will receive the noops
-    for (size_t j = 0; j < nsequence_spaces; j++) {
-      b->seq_reqs[j].seqnum = 0;
-      b->seq_reqs[j].batch_size = 0;
-      erpc::rt_assert(b->seq_reqs[j].seqnum == 0,
-                      "seqnum not zero in empty noop batch\n");
-      erpc::rt_assert(b->seq_reqs[j].batch_size == 0,
-                      "batch_size not zero in empty noop batch\n");
+    for (size_t i = 0; i < payload->batch_size; i++) {
+      ClientOp *op = proxy->client_op_pool.alloc();
+      op->populate(ReqType::kNoop, UINT16_MAX, INT64_MAX, proxy->proxy_id,
+                   nullptr, proxy->op_counter++, proxy, proxy->c);
+      proxy->add_op_to_batch(op, b);
     }
-    proxy->add_op_to_batch(op, b);
-    erpc::rt_assert(b->batch_client_ops.size() == 1, "retx batch size not 1\n");
+  } else {
+    fmt_rt_assert(payload->batch_size == b->batch_size(),
+                  "Batch_id %zu's size doesn't match payload size! "
+                  "Op count %zu, payload batch size %d\n",
+                  b->batch_id,
+                  b->batch_size(), payload->batch_size);
   }
 
   // Update seqnum for this batch and for proxy
@@ -718,8 +704,7 @@ request_seqnum_cont_func(void *_context, void *_tag) {
   }
 #endif
 
-  // we replicate noop batches
-  process_received_seqnums(b, payload->seq_reqs);
+  process_received_seqnum(b, payload->seqnum);
 
   b->proxy->tag_pool.free(tag);
 
@@ -729,10 +714,12 @@ request_seqnum_cont_func(void *_context, void *_tag) {
 }
 
 inline void
-process_received_seqnums(Batch *b, seq_req_t seq_reqs[]) {
-  // if noops now both the batch and the cli op have it
-  copy_seq_reqs(b->seq_reqs, seq_reqs);
-  b->assign_seqnums_to_ops_ms_test();
+process_received_seqnum(Batch *b, uint64_t seqnum) {
+  b->seqnum = seqnum;
+  b->proxy->max_received_seqnum = std::max(
+      b->proxy->max_received_seqnum, seqnum);
+
+  b->assign_seqnums_to_ops();
   b->replicate_seqnums();
 
   // This has to be done after the call to replicate. We want to make sure
@@ -742,7 +729,7 @@ process_received_seqnums(Batch *b, seq_req_t seq_reqs[]) {
 }
 
 /* Add op to batch if all ops before it for this client have been sequenced
- * or if the op before it (for this client) is in this batch.
+ * or if the op before it (for this client) is in this batch. 
  */
 inline bool
 Proxy::enqueue_or_add_to_batch(ClientOp *op) {
@@ -786,14 +773,12 @@ Proxy::enqueue_or_add_to_batch(ClientOp *op) {
   }
 }
 
-
 /* Push op onto client-specific queue to be sequenced later.
  */
 inline void
 Proxy::enqueue_op(ClientOp *op) {
   op_queues[op->client_id].push(op);
 }
-
 
 /* Check each client's queued ops against the highest client_reqid.
  * If the queued op's ID is equal to the icreqid, put it into the current batch;
@@ -819,60 +804,34 @@ Proxy::release_queued_ops() {
 
 // Record sequence numbers received from the sequencer
 inline void
-Batch::record_ms_seqnums() {
+Batch::record_seqnums() {
   for (auto op : batch_client_ops) {
-    for (size_t i = 0; i < nsequence_spaces; i++) {
-      uint64_t cur_seqnum =
-          op->seq_reqs[i].seqnum - op->seq_reqs[i].batch_size + 1;
-      while (cur_seqnum <= op->seq_reqs[i].seqnum) {
-        // only insert if we didn't already truncate.
-        // this can happen on followers if they receive notification
-        // they can truncate (and do so) before applying the seqnum
-        if (cur_seqnum >= c->received_ms_seqnums[i]->base_seqnum)
-          c->received_ms_seqnums[i]->insert_seqnum(cur_seqnum);
-        cur_seqnum++;
-      }
-    }
+    LOG_SEQ("Inserting %lu for batch %zu, seq_req_id %zu\n",
+            op->seqnum, batch_id, seq_req_id);
+    if (unlikely(c->received_seqnums->base_seqnum > op->seqnum))
+      continue;
+    c->received_seqnums->insert_seqnum(op->seqnum);
   }
 }
 
-
+/* Assign sequence numbers to operations in the batch. These will be ordered
+ * s.t. each client's requests are in cli_reqid order from lowest->highest. 
+ */
 inline void
-Batch::assign_seqnums_to_ops_ms_test() {
-  auto *current_seq_reqs = new seq_req_t[nsequence_spaces];
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    current_seq_reqs[i].seqnum = seq_reqs[i].seqnum - seq_reqs[i].batch_size;
-    current_seq_reqs[i].batch_size = seq_reqs[i].batch_size;
-  }
+Batch::assign_seqnums_to_ops() {
+  uint64_t current_seqnum = seqnum - batch_size();
+  LOG_SEQ("Got seqnum %lu for batch_id %lu, size %zu\n",
+          seqnum, batch_id, batch_size());
 
   for (auto op : batch_client_ops) {
-    // noops already have there reqs and batch sizes assigned
-    // todo maybe better to do outside of this function?
-    if (op->reqtype == ReqType::kNoop) {
-      fmt_rt_assert(batch_client_ops.size() == 1,
-                    "not only 1 client ops in noop batch %zu\n",
-                    batch_client_ops.size());
-      return;
-    }
+    op->seqnum = ++current_seqnum;
+    LOG_SEQ("Assigning batch_id %lu op %lu client %d with seqnum %lu\n",
+            this->batch_id, op->client_reqid, op->client_id, current_seqnum);
 
-    for (size_t i = 0; i < nsequence_spaces; i++) {
-      current_seq_reqs[i].seqnum += op->seq_reqs[i].batch_size;
-      op->seq_reqs[i].seqnum = current_seq_reqs[i].seqnum;
-      fmt_rt_assert(current_seq_reqs[i].seqnum <= seq_reqs[i].seqnum,
-                    "assign_seqnums_to_ops assigned more seqnums "
-                    "than we were allocated! "
-                    "assigned %zu allocated %zu",
-                    current_seq_reqs[i].seqnum, seq_reqs[i].seqnum);
-
-      LOG_SEQ(
-          "Assigned bid %zu op %zu, client %u seqnum %zu for seq space %zu\n",
-          batch_id, op->client_reqid, op->client_id, current_seq_reqs[i].seqnum,
-          i);
-    }
-
-    LOG_FIFO("highest_sequenced_crid %ld, client_reqid %zu\n",
+    LOG_FIFO("highest_sequenced_crid %ld, client_reqid %zu, sn %zu\n",
              proxy->highest_sequenced_crid[op->client_id],
-             op->client_reqid);
+             op->client_reqid,
+             op->seqnum);
 
     proxy->highest_sequenced_crid[op->client_id] = std::max(
         proxy->highest_sequenced_crid[op->client_id],
@@ -885,44 +844,65 @@ Batch::replicate(EntryType type) {
 #if PRINT_TIMING
   auto start = erpc::get_formatted_time();
 #endif
-  entry_t *entry = init_entry(batch_client_ops.size());
-  size_t entry_size = ENTRY_SIZE(batch_client_ops.size());
 
+  entry_t *entry;
+  size_t entry_size;
+  size_t nops = this->batch_client_ops.size();
+
+  if (type == EntryType::kSequenceNumberNoncontig) {
+    entry_size = ENTRY_SIZE_NC(nops);
+    entry = reinterpret_cast<entry_t *>(malloc(entry_size));
+
+    auto *cmdata = reinterpret_cast<client_mdata_nc_t *>(
+        &entry->cmdata_buf);
+    for (size_t i = 0; i < nops; i++) {
+      cmdata[i].reqtype = this->batch_client_ops[i]->reqtype;
+      cmdata[i].client_id = this->batch_client_ops[i]->client_id;
+      cmdata[i].client_reqid = this->batch_client_ops[i]->client_reqid;
+      cmdata[i].seqnum = this->batch_client_ops[i]->seqnum;
+      memcpy(cmdata[i].entry_val,
+             batch_client_ops[i]->entry_val,
+             MAX_CORFU_ENTRY_SIZE);
+    }
+  } else {
+    // if it is kSeq we send no metadata
+    entry_size = ENTRY_SIZE(nops);
+    entry = reinterpret_cast<entry_t *>(malloc(entry_size));
+
+    auto *cmdata = reinterpret_cast<client_mdata_t *>(
+        &entry->cmdata_buf);
+    for (size_t i = 0; i < nops; i++) {
+      cmdata[i].reqtype = batch_client_ops[i]->reqtype;
+      cmdata[i].client_id = batch_client_ops[i]->client_id;
+      cmdata[i].client_reqid = batch_client_ops[i]->client_reqid;
+      memcpy(cmdata[i].entry_val,
+             batch_client_ops[i]->entry_val,
+             MAX_CORFU_ENTRY_SIZE);
+    }
+  }
+
+
+  // followers should replace with their own pointer when they allocate the batch for this entry
   entry->batch = this;
 
   // initialize raft entry
-  entry->highest_cons_batch_id = proxy->highest_cons_batch_id;
   entry->type = type;
-  entry->seq_req_id = seq_req_id;
+  entry->highest_cons_batch_id = proxy->highest_cons_batch_id;
+  entry->base_seqnum = proxy->c->received_seqnums->base_seqnum;
   entry->batch_id = batch_id;
-  entry->batch_size = batch_client_ops.size();
-
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    entry->base_seqnums[i] = c->received_ms_seqnums[i]->base_seqnum;
-  }
-
-  auto *cmdata = entry->cmdata_buf;
-  for (size_t i = 0; i < batch_client_ops.size(); i++) {
-    cmdata[i].reqtype = batch_client_ops[i]->reqtype;
-    cmdata[i].client_id = batch_client_ops[i]->client_id;
-    cmdata[i].client_reqid = batch_client_ops[i]->client_reqid;
-
-    copy_seq_reqs(cmdata[i].seq_reqs, batch_client_ops[i]->seq_reqs);
-  }
-
-  // here we've created the entry
-  auto *buf = static_cast<uint8_t *>(malloc(entry_size));
-  serialize_entry(buf, entry);
-
-  delete entry;
+  entry->seq_num = seqnum;
+  entry->seq_req_id = seq_req_id;
+  entry->batch_size = batch_size();
 
   // create raft entry
   msg_entry_t raft_entry;
   raft_entry.type = RAFT_LOGTYPE_NORMAL;
-  raft_entry.data.buf = buf;
+  raft_entry.data.buf = entry;
   raft_entry.data.len = entry_size;
-  raft_entry.id = my_raft_id;
+  raft_entry.id =
+      my_raft_id;
 
+  // submit the entry for replication
   raft_recv_entry(proxy->raft, &raft_entry, &raft_entry_response);
 
 #if PRINT_TIMING
@@ -936,8 +916,7 @@ Proxy::replicate_recovery() {
   auto start = erpc::get_formatted_time();
 #endif
 
-  LOG_RECOVERY("[%zu] Proxy %d in replicate recovery.\n",
-                c->thread_id, proxy_id);
+  LOG_RECOVERY("Proxy %d in replicate recovery.\n", proxy_id);
 
   entry_t *entry;
   size_t n = 0;
@@ -948,6 +927,7 @@ Proxy::replicate_recovery() {
   entry->batch = nullptr;
   entry->type = EntryType::kSwitchToBackupSeq;
   entry->batch_id = 0;
+  entry->seq_num = 0;
   entry->seq_req_id = 0;
   entry->batch_size = 0;
 
@@ -956,7 +936,8 @@ Proxy::replicate_recovery() {
   raft_entry.type = RAFT_LOGTYPE_NORMAL;
   raft_entry.data.buf = entry;
   raft_entry.data.len = ENTRY_SIZE(n);
-  raft_entry.id = my_raft_id;
+  raft_entry.id =
+      my_raft_id;
 
   // submit the entry for replication
   raft_recv_entry(raft, &raft_entry, &dummy_entry_response);
@@ -966,10 +947,16 @@ Proxy::replicate_recovery() {
 #endif
 }
 
-
 // Replicate sequence number among Raft peers
 inline void
 Batch::replicate_seqnums() {
+  this->replicate(EntryType::kSequenceNumber);
+}
+
+inline void
+Batch::replicate_seqnums_noncontig() {
+  debug_print(DEBUG_RAFT_SMALL, "pid: %lu Replicating seqnum for batch %lu!\n",
+              proxy->proxy_id, batch_id);
   this->replicate(EntryType::kSequenceNumberNoncontig);
 }
 
@@ -977,48 +964,71 @@ Batch::replicate_seqnums() {
 inline void
 Batch::submit_batch_to_system() {
   for (auto op : batch_client_ops) {
-    static int i = 0;
     LOG_RAFT("[%zu] Submitting op with type %u to system\n",
              c->thread_id, static_cast<uint8_t>(op->reqtype));
     if (op->reqtype == ReqType::kNoop) {
-      erpc::rt_assert(i == 0,
-                      "got a noop where the first op was not noop\n");
-      // one of the ops in the batch is a kNoop, they all should be
-      for (auto cop : batch_client_ops) {
-        fmt_rt_assert(cop->reqtype == ReqType::kNoop,
-                      "not all ops in a noop batch were actually noops\n");
-      }
-      send_noop_to_client(this, op);
+      LOG_ERROR("[%zu] Sending seqnum %zu to client for plot\n",
+                c->thread_id, op->seqnum);
+      send_noop_to_client(this, op->seqnum);
+      send_noop_to_corfu_server(op->proxy, op->proxy->c, op->seqnum);
     } else {
       op->submit_operation();
     }
   }
 }
 
-
-// Dummy implementation: just call continuations for each operation in batch,
-// see other branches for actual service implementations
-/*** This is where Mason gives the operations to the service-defined stub ***/
+/*** This is where Mason hands the operation to the service stub to execute
+ * by calling callbacks defined per ReqType. The stub can set the continuation
+ * function when sending the message via eRPC to take control again when
+ * the server responds.
+ * */
 inline void
-ClientOp::submit_operation(void) {
-  LOG_RAFT("[%zu] in submit_operation_cont_func\n", proxy->c->thread_id);
-  submit_operation_cont_func(nullptr, reinterpret_cast<void *>(this));
-}
+ClientOp::submit_operation() {
+  Tag *tag = proxy->tag_pool.alloc();
+  tag->alloc_msgbufs(c);
 
-void Proxy::complete_and_send_current_batch(void) {
-  c->update_avg_batch_size(current_batch->batch_size());
-  c->stat_batch_count++;
-  current_batch->seq_req_id = seq_req_id++;
+  tag->corfu_replies = 0;
+  tag->op = this;
 
-  appended_batch_map[current_batch->batch_id] =
-      current_batch;
+  proxy->c->rpc->resize_msg_buffer(&tag->req_msgbuf, sizeof(corfu_entry_t));
+  erpc::rt_assert(tag->req_msgbuf.get_data_size() == sizeof(corfu_entry_t),
+                  "req_msgbuf in submit_op was too small\n");
 
-  for (size_t i = 0; i < current_batch->batch_size(); i++) {
-    auto *op = current_batch->batch_client_ops[i];
-    client_retx_in_progress_map[op->client_id][op->client_reqid] = op;
+  auto *entry = reinterpret_cast<corfu_entry_t *>(tag->req_msgbuf.buf);
+  entry->log_position = seqnum;
+
+  // this is where callbacks will be
+  erpc::erpc_cont_func_t cont_func;
+  int session_num;
+  switch (reqtype) {
+    case ReqType::kCorfuAppend: {
+      memcpy(entry->entry_val,
+             entry_val,
+             MAX_CORFU_ENTRY_SIZE);
+      cont_func = corfu_append_cont_func;
+      session_num = (*c->log_pos_to_session_num(entry->log_position))[0];
+      break;
+    }
+
+    case ReqType::kCorfuRead: {
+
+      cont_func = corfu_read_cont_func;
+      session_num = (*c->log_pos_to_session_num(entry->log_position))[
+          kCorfuReplicationFactor - 1];
+      break;
+    }
+
+    default: {
+      fmt_rt_assert(false, "unknown request type %d\n", reqtype);
+    }
   }
-  // we can now request it immediately
-  current_batch->request_seqnum(false);
+
+  erpc::rt_assert(c->rpc->is_connected(session_num),
+                  "Not connected to Corfu machine!\n");
+
+  c->rpc->enqueue_request(session_num, static_cast<uint8_t>(reqtype),
+                          &tag->req_msgbuf, &tag->resp_msgbuf,
+                          cont_func, reinterpret_cast<void *>(tag));
 }
 
 // Callback for batch timeouts
@@ -1029,10 +1039,11 @@ batch_to_cb(void *_proxy) {
   auto start = erpc::get_formatted_time();
 #endif
 
-  auto *proxy = reinterpret_cast<Proxy *>(_proxy);
+  Proxy *proxy = reinterpret_cast<Proxy *>(_proxy);
 
   // Do nothing if the batch hasn't received any requests; else,
   // process batch.
+
   if (proxy->current_batch->batch_size() != 0) {
     LOG_TIMERS("Thread %lu: Batch %p expired with size %d!\n",
                proxy->c->thread_id,
@@ -1045,7 +1056,21 @@ batch_to_cb(void *_proxy) {
   } else {
     // Check for ops that may have been enqueued from reordering
     proxy->release_queued_ops();
-    proxy->complete_and_send_current_batch();
+
+    proxy->c->update_avg_batch_size(
+        proxy->current_batch->batch_size());
+    proxy->c->stat_batch_count++;
+    proxy->current_batch->seq_req_id = proxy->seq_req_id++;
+
+    proxy->appended_batch_map[proxy->current_batch->batch_id] =
+        proxy->current_batch;
+
+    for (size_t i = 0; i < proxy->current_batch->batch_size(); i++) {
+      auto *op = proxy->current_batch->batch_client_ops[i];
+      proxy->client_retx_in_progress_map[op->client_id][op->client_reqid] = op;
+    }
+    // we can now request it immediately
+    proxy->current_batch->request_seqnum(false);
 
     proxy->create_new_batch();
 
@@ -1059,47 +1084,100 @@ batch_to_cb(void *_proxy) {
 #endif
 }
 
-
-// Respond to client
+// Check if operation's seqnum has been persisted at DTs; if yes,
+// respond to client. If not, put in minPQ and wait for persistence.
 inline void
-submit_operation_cont_func(void *_context, void *_tag) {
-  (void) _context;
-  auto op = reinterpret_cast<ClientOp *>(_tag);
-  Proxy *proxy = op->proxy;
+corfu_append_cont_func(void *_context, void *_tag) {
+  Tag *tag = reinterpret_cast<Tag *>(_tag);
+  tag->corfu_replies++;
 
-  LOG_SEQ("[%lu]: Responding to client %d req_id %lu\n",
-          proxy->c->thread_id, op->client_id, op->client_reqid);
-  if (DEBUG_SEQ) print_seqreqs(op->seq_reqs, nsequence_spaces);
+  LOG_CORFU("Received a response from some Corfu server nresp: %ld\n",
+            tag->corfu_replies);
 
-  // should I not do this if I'm not the leader?
-  // this is called immediately checking if I'm the leader in applylog right now
-  //   so this should never execute
-  if (!raft_is_leader(proxy->raft)) {
-    fmt_rt_assert(false,
-                  "Proxy ID: %d is not the leader in submit op cont func!\n",
-                  proxy->proxy_id);
-    // I am no longer the leader for a seqnum that I requested, don't do anything
-    return;
+  // have not finished replicating in Corfu
+  if (tag->corfu_replies != kCorfuReplicationFactor) {
+    ClientOp *op = tag->op;
+
+    int session_num =
+        (*tag->c->log_pos_to_session_num(op->seqnum))[tag->corfu_replies];
+
+    tag->c->rpc->enqueue_request(session_num,
+                                 static_cast<uint8_t>(op->reqtype),
+                                 &tag->req_msgbuf,
+                                 &tag->resp_msgbuf,
+                                 corfu_append_cont_func,
+                                 reinterpret_cast<void *>(tag));
+  } else { // can return to the client now, we've pushed all the way to the tail
+    (void) _context;
+    ClientOp *op = tag->op;
+    Proxy *proxy = op->batch->proxy;
+
+    // free the tag now, this request is done
+    proxy->tag_pool.free(tag);
+
+    // OK to return to client
+    debug_print(DEBUG_THREAD,
+                "Thread %lu: Responding to client %d reqtype %u req_id %d, seqnum %lu\n",
+                proxy->c->thread_id,
+                op->client_id,
+                op->reqtype,
+                op->client_reqid,
+                op->seqnum);
+    op->respond_to_client();
   }
-
-  op->respond_to_client();
 }
 
+void corfu_read_cont_func(void *, void *_tag) {
+  Tag *tag = reinterpret_cast<Tag *>(_tag);
+  ClientOp *op = tag->op;
+
+  Proxy *proxy = op->proxy;
+  auto *entry = reinterpret_cast<corfu_entry_t *>(tag->resp_msgbuf.buf);
+  // free the tag now, this request is done
+
+  proxy->c->rpc->resize_msg_buffer(&op->req_handle->pre_resp_msgbuf,
+                                   sizeof(client_payload_t));
+
+  auto *payload = reinterpret_cast<client_payload_t *>(
+      op->req_handle->pre_resp_msgbuf.buf);
+
+  payload->reqtype = op->reqtype;
+  payload->proxy_id = op->proxy_id;
+  payload->client_id = op->client_id;
+  payload->client_reqid = op->client_reqid;
+
+  payload->seqnum = entry->log_position;
+
+  // fill in response info
+  memcpy(payload->entry_val, entry->entry_val, MAX_CORFU_ENTRY_SIZE);
+  payload->return_code = entry->return_code;
+
+  erpc::rt_assert(entry->return_code == RetCode::kSuccess ||
+                      entry->return_code == RetCode::kDoesNotExist ||
+                      entry->return_code == RetCode::kNoop,
+                  "return code not succes nor DNE\n");
+
+  op->c->rpc->enqueue_response(op->req_handle,
+                               &op->req_handle->pre_resp_msgbuf);
+
+  proxy->client_op_pool.free(op);
+  proxy->tag_pool.free(tag);
+}
 
 // Respond to the client
 inline void
 ClientOp::populate_client_response() {
   proxy->c->rpc->resize_msg_buffer(
-      &req_handle->pre_resp_msgbuf, client_payload_size(nsequence_spaces));
+      &req_handle->pre_resp_msgbuf, sizeof(client_payload_t));
 
   auto *payload = reinterpret_cast<client_payload_t *>(
       req_handle->pre_resp_msgbuf.buf);
   payload->proxy_id = proxy_id;
   payload->client_id = client_id;
   payload->client_reqid = client_reqid;
-  copy_seq_reqs(payload->seq_reqs, seq_reqs);
+  payload->seqnum = seqnum;
+  payload->reqtype = reqtype;
 }
-
 
 inline void
 ClientOp::respond_to_client() {
@@ -1120,24 +1198,12 @@ ClientOp::respond_to_client() {
     return;
   }
 
-
   proxy->ops_with_handles[client_id].erase(client_reqid);
-
   populate_client_response();
   auto *payload = reinterpret_cast<client_payload_t *>(
       req_handle->pre_resp_msgbuf.buf);
-
-  // adding to explicitly say I am the leader
-  // if I'm replying with a number to a client I better be the leader
-  erpc::rt_assert(raft_is_leader(batch->proxy->raft),
-                  "was not the leader when responding to client\n");
-  payload->not_leader = !raft_is_leader(batch->proxy->raft);
-
-  if (payload->not_leader != 0) {
-    printf("going to claim I am not the leader: is_leader?: %d\n",
-           raft_is_leader(batch->proxy->raft));
-    fflush(stdout);
-  }
+  payload->seqnum = seqnum; // done twice?
+  payload->not_leader = false;
 
   erpc::rt_assert(payload->not_leader == 0,
                   "claiming I'm not the leader while responding to an op\n");
@@ -1148,7 +1214,6 @@ ClientOp::respond_to_client() {
 
   req_handle = nullptr;
   has_handle = false;
-
   batch->c->stat_resp_tx_tot++;
 #endif
 }
@@ -1166,13 +1231,14 @@ ClientOp::respond_to_client() {
 inline int
 connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
                           MachineIdx machine_idx) {
-  auto idx = static_cast<uint8_t>(machine_idx);
+  uint8_t idx = static_cast<uint8_t>(machine_idx);
   std::string uri;
   std::string port = ":31850";
   int session_num;
 
   uri = ip + port;
   session_num = c->rpc->create_session(uri, remote_tid);
+
   erpc::rt_assert(session_num >= 0, "Failed to create session");
 
   if (machine_idx != MachineIdx::CLIENT) {
@@ -1201,13 +1267,14 @@ connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
 inline int
 connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
                           MachineIdx machine_idx, Proxy *p) {
-  auto idx = static_cast<uint8_t>(machine_idx);
+  uint8_t idx = static_cast<uint8_t>(machine_idx);
   std::string uri;
   std::string port = ":31850";
   int session_num;
 
   uri = ip + port;
   session_num = c->rpc->create_session(uri, remote_tid);
+
   erpc::rt_assert(session_num >= 0, "Failed to create session");
 
   // why don't we wait for CLIENT?
@@ -1235,7 +1302,8 @@ connect_and_store_session(WorkerContext *c, std::string ip, int remote_tid,
  * @return 0 on success, fails otherwise.
  */
 inline int
-connect_and_store_session_async(WorkerContext *c, std::string ip,
+connect_and_store_session_async(WorkerContext *c,
+                                std::string ip,
                                 int remote_tid,
                                 MachineIdx machine_idx) {
   uint8_t idx = static_cast<uint8_t>(machine_idx);
@@ -1245,7 +1313,8 @@ connect_and_store_session_async(WorkerContext *c, std::string ip,
 
   uri = ip + port;
   LOG_INFO("Asynchronously connecting with uri %s, remote_tid %d\n",
-           uri.c_str(), remote_tid);
+           uri.c_str(),
+           remote_tid);
 
   session_num = c->rpc->create_session(uri, remote_tid);
   erpc::rt_assert(session_num >= 0, "Failed to create session");
@@ -1254,10 +1323,12 @@ connect_and_store_session_async(WorkerContext *c, std::string ip,
   return 0;
 }
 
-
+// Connect to sequencer. If thread 0, connect to your
+// garbage collection buddy
 inline void
 establish_cats_connections(WorkerContext *c, int remote_tid) {
   printf("\nEstablishing CATS connections...\n");
+
   printf("Connecting to Rpcid %d on machines:", remote_tid);
 #if !MOCK_SEQ
   printf("\nsequencer: ");
@@ -1266,16 +1337,78 @@ establish_cats_connections(WorkerContext *c, int remote_tid) {
 
   // If this is the 0th thread, connect to the 0th thread on the neighbor
   if (c->thread_id == 0 && !FLAGS_no_gc) {
-    LOG_INFO("next proxy0: \n");
-    connect_and_store_session(c, nextproxy0_ip, 0, MachineIdx::NEXTPX0);
-    LOG_INFO("next proxy1: \n");
-    connect_and_store_session(c, nextproxy1_ip, 0, MachineIdx::NEXTPX1);
-    LOG_INFO("next proxy2: \n");
-    connect_and_store_session(c, nextproxy2_ip, 0, MachineIdx::NEXTPX2);
+    printf("\nnext proxy: ");
+    connect_and_store_session(c, nextproxy_ip, 0, MachineIdx::NEXTPX);
   }
 
   printf("... established CATS connections\n");
   fflush(stdout);
+}
+
+// Connect to Rpc endpoints and push session numbers onto session vector
+// for future use
+int
+connect_to_corfu_machine(WorkerContext *c,
+                         size_t idx,
+                         size_t rep_num,
+                         size_t sv_i) {
+  std::string uri;
+  std::string port = ":31850";
+  int session_num;
+
+  uri = c->corfu_ips[idx] + port;
+  std::vector<int> sessions;
+
+  for (uint8_t thread = 0; thread < N_CORFUTHREADS; thread++) {
+    printf("Connecting with uri %s, remote_tid %d\n", uri.c_str(), thread);
+
+    session_num = c->rpc->create_session(uri, thread);
+
+    erpc::rt_assert(session_num >= 0, "Failed to create session");
+    sessions.push_back(session_num);
+
+    c->corfu_session_nums[sv_i + thread][rep_num] = session_num;
+  }
+  for (int sn : sessions) {
+    while (!c->rpc->is_connected(sn) && !force_quit) {
+      c->rpc->run_event_loop_once();
+      // send heartbeats while corfu servers are coming up
+      c->proxies.begin()->second->call_raft_periodic(100);
+    }
+
+  }
+  printf("Connected to corfu machine uri: %s\n", uri.c_str());
+  fflush(stdout);
+
+  return 0;
+}
+
+// n_corfu_servers is the number of logical servers (threads)
+void
+establish_corfu_connections(WorkerContext *c) {
+  printf(
+      "Establishing corfuips size %lu NCORFUTHREADS %d repfac %zu %lu Corfu connections... \n",
+      c->corfu_ips.size(),
+      N_CORFUTHREADS,
+      kCorfuReplicationFactor,
+      (c->corfu_ips.size() * N_CORFUTHREADS) / kCorfuReplicationFactor);
+  c->corfu_session_nums.resize(
+      (c->corfu_ips.size() * N_CORFUTHREADS) / kCorfuReplicationFactor);
+
+  for (size_t i = 0; i < c->corfu_session_nums.size(); i++)
+    c->corfu_session_nums[i].resize(kCorfuReplicationFactor);
+
+  size_t rep_num = 0;
+  size_t j = 0;
+
+  for (size_t i = 0; i < c->corfu_ips.size(); i++) {
+    connect_to_corfu_machine(c, i, rep_num, j);
+
+    rep_num = (rep_num + 1) % kCorfuReplicationFactor;
+    if (rep_num == 0) j += N_CORFUTHREADS;
+  }
+
+  printf("...done establishing Corfu connections.\n");
 }
 
 inline void
@@ -1310,7 +1443,6 @@ create_logical_proxies(WorkerContext *c) {
   fflush(stdout);
 }
 
-
 // Threads' main loop:
 // - connect to seq, backends if applicable
 // - create data structures for each logical proxy (leader or follower)
@@ -1324,10 +1456,12 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
 
   c.app_stats = app_stats;
   c.thread_id = tid;
-  for (size_t i = 0; i < nsequence_spaces; i++) {
-    c.received_ms_seqnums[i]->thread_id = tid;
-  }
+  c.received_seqnums->thread_id = tid;
   c.nconnections = 0;
+  c.received_seqnums->thread_id = tid;
+
+  // make a list of all the corfu ips
+  boost::split(c.corfu_ips, FLAGS_corfu_ips, boost::is_any_of(","));
 
 #if !NO_ERPC
   int remote_tid = tid % N_SEQTHREADS;
@@ -1340,9 +1474,12 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
                                   sm_handler, tid % NPHY_PORTS);
   printf("... created RPC endpoint\n");
 
-  rpc.set_pre_resp_msgbuf_size(client_payload_size(nsequence_spaces));
+  printf("rpc pre_resp_msg_size %zu\n", rpc.pre_resp_msgbuf_size);
+  rpc.set_pre_resp_msgbuf_size(sizeof(client_payload_t));
+  printf("after change %zu\n", rpc.pre_resp_msgbuf_size);
 
   printf("max message size %zu\n", c.rpc->get_max_msg_size());
+  printf("max data per packet size %zu\n", c.rpc->get_max_data_per_pkt());
 
   rpc.retry_connect_on_invalid_rpc_id = true;
   printf("Done creating RPC endpoint\n");
@@ -1354,6 +1491,7 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
 
   establish_cats_connections(&c, remote_tid);
 
+
   // establish Raft connections,
   // ASSUMPTION: *** our peers have the same thread_id ***
   establish_raft_connections(&c, c.thread_id);
@@ -1363,16 +1501,16 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
     connect_and_store_session(&c, client_ip, 0, MachineIdx::CLIENT);
   }
 
-  // it seems number of proxy groups per thread == 1 is the best
-  // need unique proxy_ids for the sequencer amo map
-  // 1 proxy per thread simplifies things
+  // todo it seems number of proxy groups per thread == 1 is the best
+  //  need unique proxy_ids for the sequencer amo map
+  //  1 proxy per thread simplifies things
   erpc::rt_assert(c.proxies.size() == 1, "proxies size not 1\n");
 
   // check which proxies are supposed to be the leader, then try to become the leader
   for (auto &el : c.proxies) {
     Proxy *proxy = el.second;
     raft_set_election_timeout(proxy->raft,
-                              kRaftElectionTimeout);
+                              kRaftElectionTimeout); // let's use a 100ms timeout instead of 1000
     if (proxy->am_leader) {
 
       printf("first call to raft_periodic\n");
@@ -1381,9 +1519,10 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
       proxy->raft_periodic_tsc = erpc::rdtsc();
     }
 
-
   }
 
+  // corfu_ips need to be set up before this
+  establish_corfu_connections(&c);
 
 #else
   (void)nexus;
@@ -1403,7 +1542,6 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
   if (kUtilPrinting) {
     c.init_util_timers();
   }
-  // LOG_RAFT("initiated timers\n");
 
   while (likely(!force_quit)) {
     if (unlikely(c.in_recovery)) {
@@ -1428,13 +1566,14 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
       proxy->call_raft_periodic(0);
       raft_apply_all(proxy->raft);
 
-      if (unlikely(raft_get_log_count(proxy->raft) >=
-                   FLAGS_max_log_size)) {
+      if (unlikely(raft_get_log_count(proxy->raft)
+                       >= FLAGS_max_log_size)) {
         proxy->proxy_snapshot();
       }
     }
     if (PRINT_TIMING)
-      printf("[%s] raft_periodic for all proxies [%s]\n", start.c_str(),
+      printf("[%s] raft_periodic for all proxies [%s]\n",
+             start.c_str(),
              erpc::get_formatted_time().c_str());
 
     if (!NO_ERPC) {
@@ -1447,9 +1586,6 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
                erpc::get_formatted_time().c_str());
     }
 
-    // if I am here, and I am not the leader, unless I become the leader again
-    // no client in retx_in_progress map with a handle will be returned to
-    // no client in done map should have a handle?
     for (auto &el : c.proxies) {
       Proxy *p = el.second;
       if (!raft_is_leader(p->raft)) {
@@ -1468,9 +1604,10 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
             erpc::rt_assert(op->has_handle,
                             "op did not have handle in has handle map\n");
 
-            printf("[%s] pid: %u lost leadership at some point "
-                   "with outstanding requests, return not leader\n",
-                erpc::get_formatted_time().c_str(), p->proxy_id);
+            printf(
+                "[%s] pid: %u lost leadership at some point with outstanding requests, return not leader\n",
+                erpc::get_formatted_time().c_str(),
+                p->proxy_id);
             fflush(stdout);
 
             reply_not_leader(op->req_handle, p->proxy_id,
@@ -1500,7 +1637,7 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
 inline void Proxy::call_raft_periodic(size_t nms) {
   // raft_periodic() uses msec_elapsed for only request and election timeouts.
   // msec_elapsed is in integer milliseconds which does not work for us because
-  // we invoke raft_periodic() much more frequently. Instead, we accumulate
+  // we invoke raft_periodic() much work frequently. Instead, we accumulate
   // cycles over calls to raft_periodic().
   size_t cur_tsc = erpc::rdtsc();
   size_t msec_elapsed =
@@ -1542,14 +1679,15 @@ Proxy::proxy_snapshot() {
   // serialize and write proxy struct to file with boost
   std::string temp;
   temp = "/usr/local/snapshot" + c->my_ip + std::to_string(c->thread_id) +
-         std::to_string(proxy_id);
+      std::to_string(proxy_id);
 
   last_included_index = raft_get_commit_idx(raft);
   last_included_term = raft_get_entry_from_idx(raft, last_included_index)->term;
 
-  uint64_t tf_start; (void) tf_start;
+  uint64_t tf_start;
   uint64_t t_start __attribute__((unused));
   {
+    std::cout << p_string() << " serializing to " << temp << std::endl;
     // ofs must be closed before ifs, putting it in its own scope ensures that
     std::ofstream ofs(temp);
 
@@ -1560,14 +1698,22 @@ Proxy::proxy_snapshot() {
     oa << this;
     tf_start = erpc::rdtsc();
   }
-  LOG_INFO("%s Serialization took %Lf us flush time %Lf\n",
+  printf("%s Serialization took %Lf us flush time %Lf\n",
          p_string().c_str(), cycles_to_usec(erpc::rdtsc() - t_start),
          cycles_to_usec(erpc::rdtsc() - tf_start));
+
+  // write the bitmap to a file
+  t_start = erpc::rdtsc();
+  temp = "/usr/local/bitmap" + c->my_ip + std::to_string(c->thread_id) +
+      std::to_string(proxy_id);
+  c->received_seqnums->write_to_file(temp.c_str());
+
+  printf("%s Serialization of bitmap to file took %Lf\n",
+         p_string().c_str(), cycles_to_usec(erpc::rdtsc() - t_start));
 
   // tell raft we are done snapshotting
   raft_end_snapshot(raft);
 }
-
 
 // Launch proxy worker threads with configured numbers of leaders/followers
 inline void
@@ -1597,7 +1743,6 @@ launch_threads(size_t nthreads, erpc::Nexus *nexus) {
 
   printf("deleting app_stats... ");
   fflush(stdout);
-//    delete[] app_stats;
   printf("done deleting app_stats\n");
   fflush(stdout);
 }
@@ -1645,7 +1790,6 @@ signal_handler(int signum) {
   fflush(stdout);
 }
 
-
 int
 main(int argc, char **argv) {
   freq_ghz = erpc::measure_rdtsc_freq();
@@ -1667,10 +1811,7 @@ main(int argc, char **argv) {
   gflags::ParseCommandLineFlags(&argc, &argv, true);
 
   my_ip = FLAGS_my_ip;
-  nextproxy0_ip = FLAGS_nextproxy0_ip;
-  nextproxy1_ip = FLAGS_nextproxy1_ip;
-  nextproxy2_ip = FLAGS_nextproxy2_ip;
-
+  nextproxy_ip = FLAGS_nextproxy_ip;
   seq_ip = FLAGS_seq_ip;
   backupseq_ip = FLAGS_backupseq_ip;
   replica_1_ip = FLAGS_replica_1_ip;
@@ -1684,13 +1825,9 @@ main(int argc, char **argv) {
   replica_1_raft_id = FLAGS_replica_1_raft_id;
   replica_2_raft_id = FLAGS_replica_2_raft_id;
 
-  nsequence_spaces = FLAGS_nsequence_spaces;
-  printf("FLAGS_nsequence_spaces is %zu nsequence_spaces %zu\n",
-         FLAGS_nsequence_spaces, nsequence_spaces);
-
   erpc::rt_assert(FLAGS_nthreads > 0, "nthreads must be > 0\n");
 
-  if (nextproxy0_ip.empty()) {
+  if (nextproxy_ip.empty()) {
     printf("nextproxy is empty setting no_gc to true.\n");
     // todo we can still do garbage collection if there is one proxy
     FLAGS_no_gc = true;
@@ -1705,8 +1842,13 @@ main(int argc, char **argv) {
 
   // Normal operation handlers
   nexus.register_req_func(
-      static_cast<uint8_t>(ReqType::kExecuteOpA),
+      static_cast<uint8_t>(ReqType::kCorfuAppend),
       client_op_handler);
+
+  // write a separate handler?
+  nexus.register_req_func(
+      static_cast<uint8_t>(ReqType::kCorfuRead),
+      corfu_read_handler);
   nexus.register_req_func(
       static_cast<uint8_t>(ReqType::kDoGarbageCollection),
       garbage_collection_handler);

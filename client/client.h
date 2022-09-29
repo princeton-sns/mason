@@ -1,11 +1,11 @@
 #define IDENT(x) x
 #define XSTR(x) #x
 #define STR(x) XSTR(x)
-#define PATH(x, y) STR(IDENT(x)IDENT(y))
+#define PATH(x,y) STR(IDENT(x)IDENT(y))
 
 #define Fname /common.h
 
-#include PATH(COMMON_DIR, Fname)
+#include PATH(COMMON_DIR,Fname)
 
 #include "common.h"
 #include "limits.h"
@@ -15,84 +15,83 @@
 #define DEBUG_FAILOVER 0
 
 DEFINE_uint64(proxy_threadid, 0,
-              "Proxy threadid to connect to");
-DEFINE_uint64(concurrency, 16,
-              "Number of concurrent requests per client");
-DEFINE_uint64(nthreads, 16,
-              "Number of threads (independent clients) to run "
-              "on this client");
+        "Proxy threadid to connect to");
+DEFINE_uint64(concurrency, 16, 
+        "Number of concurrent requests per client");
+DEFINE_uint64(nthreads, 16, 
+        "Number of threads (independent clients) to run "
+        "on this client");
 DEFINE_uint64(nproxy_leaders, 0,
-              "Number of proxy leaders per proxy machine");
+        "Number of proxy leaders per proxy machine");
 DEFINE_uint64(nproxy_threads, 0,
-              "Number of proxy threads per proxy machine");
-DEFINE_uint64(expduration, 10,
-              "Experiment duration");
-DEFINE_string(my_ip, "",
-              "IP address for this machine ");
+        "Number of proxy threads per proxy machine");
+DEFINE_uint64(expduration, 10, 
+        "Experiment duration");
+DEFINE_string(my_ip, "", 
+        "IP address for this machine ");
 DEFINE_string(proxy_ip_0, "",
-              "IP address for the proxy n");
+        "IP address for the proxy n");
 DEFINE_string(proxy_ip_1, "",
-              "IP address for the proxy n");
+        "IP address for the proxy n");
 DEFINE_string(proxy_ip_2, "",
-              "IP address for the proxy n");
+        "IP address for the proxy n");
 DEFINE_uint32(proxy_id, 0,
-              "Proxy id");
+        "Proxy id");
 DEFINE_string(out_dir, "",
-              "IP address for the proxy n");
+        "IP address for the proxy n");
 DEFINE_string(results_file, "",
-              "File to print results");
-DEFINE_uint64(nsequence_spaces, 0,
-              "Total number of sequence spaces");
-
-extern uint64_t nsequence_spaces;
+              "File results should go to");
+DEFINE_uint64(max_log_position, 0,
+"Max log positino to read from, indicates read only");
 
 volatile bool force_quit = false;
-double failover_to = 1;
-
 
 struct app_stats_t;
 
-class Operation;
+class Operation; 
 class Tag;
 class ClientContext;
 
+
 class Tag {
 public:
-  bool msgbufs_allocated = false;
-  ClientContext *c;
-  Operation *op;
+    bool msgbufs_allocated = false;
+    ClientContext *c;
+    Operation *op;
 
-  erpc::MsgBuffer req_msgbuf;
-  erpc::MsgBuffer resp_msgbuf;
+    erpc::MsgBuffer req_msgbuf;
+    erpc::MsgBuffer resp_msgbuf;
 
-  ~Tag();
+    ~Tag();
 
-  void alloc_msgbufs(ClientContext *c, Operation *);
+    void alloc_msgbufs(ClientContext *c, Operation *);
 };
 
 
 class Operation {
 public:
-  ReqType reqtype;
-  client_reqid_t local_reqid;  // client-assigned reqid
-  size_t local_idx;  // Index into ops array
-  size_t cur_px_conn = 0;
-  bool received_response = false;
+    ReqType reqtype;
+    client_reqid_t local_reqid;  // client-assigned reqid
+    size_t local_idx;  // Index into ops array
+    size_t cur_px_conn = 0;
+    bool received_response = false;
+    uint64_t read_pos = 0;
 
-  Operation(size_t i) {
-    local_idx = i;
-  }
+    Operation(size_t i) {
+        local_idx = i;
+    }
 
-  void reset(client_reqid_t local_reqid) {
-    this->local_reqid = local_reqid;
-  }
+    void reset(client_reqid_t local_reqid) {
+        this->local_reqid = local_reqid;
+    }
 };
 
-struct CmpReqIds {
-  // returns true if a comes before b, and should be output later
-  bool operator()(uint64_t a, uint64_t b) const {
-    return a > b;
-  }
+struct CmpReqIds
+{
+    // returns true if a comes before b, and should be output later
+    bool operator()(uint64_t a, uint64_t b) const {
+        return a > b;
+    }
 };
 
 enum State {
@@ -103,103 +102,108 @@ enum State {
 
 class ClientContext : public ThreadContext {
 public:
-  // For stats
-  struct timespec tput_t0;  // Throughput start time
-  app_stats_t *app_stats;
-  size_t stat_resp_rx_tot = 0;
-  State state;
+    // For stats
+    struct timespec tput_t0;  // Throughput start time
+    app_stats_t *app_stats;
+    size_t stat_resp_rx_tot = 0;
+    State state;
 
-  uint16_t client_id;
+    uint16_t client_id;
 
-  std::vector<int> sessions;
+    std::vector<int> sessions;
 
-  erpc::Latency latency;
+    erpc::Latency latency;
 
-  uint16_t proxy_id;
-  client_reqid_t reqid_counter = 0;
+    uint16_t proxy_id;
+    client_reqid_t reqid_counter = 0;
 
-  client_reqid_t highest_cons_reqid = -1;
-  std::priority_queue<client_reqid_t, std::vector<client_reqid_t>,
-      CmpReqIds> done_req_ids;
+    client_reqid_t highest_cons_reqid = -1;
+    std::priority_queue<client_reqid_t, std::vector<client_reqid_t>, CmpReqIds> done_req_ids;
 
-  bool alive_reps[3];
+    bool alive_reps[3];
 
-  char *stats;
-  size_t completed_slots = 0;
+    char *stats;
+    size_t completed_slots = 0;
 
-  FILE *fp;
+    uint64_t max_log_position = 0;
 
-  Operation *ops[MAX_CONCURRENCY];
-  size_t req_tsc[MAX_CONCURRENCY];
-  size_t last_retx[MAX_CONCURRENCY];
+    FILE *fp;
 
-  AppMemPool<Tag> tag_pool;
+    std::random_device rd;
+    std::mt19937_64 gen;
+    std::uniform_int_distribution<unsigned long long> dis;
 
-  void allocate_ops() {
-    for (size_t i = 0; i < FLAGS_concurrency; i++) {
-      ops[i] = new Operation(i);
-    }
-  }
+    Operation *ops[MAX_CONCURRENCY];
+    size_t req_tsc[MAX_CONCURRENCY];
+    size_t last_retx[MAX_CONCURRENCY];
 
-  void next_proxy(Operation *op) {
-    size_t tmp = op->cur_px_conn;
-    // all ops follow 0. this seems to work better than individually changing
-    if (op->local_idx == 0) {
-      for (size_t i = 0; i < 3; i++) {
-        op->cur_px_conn = (op->cur_px_conn + 1) % 3;
-        // always true
-        if (this->alive_reps[op->cur_px_conn]) {
-        debug_print(1, "[%zu] Switching from %zu to %zu, op %zu\n",
-                    thread_id, tmp, op->cur_px_conn, op->local_idx);
+    AppMemPool<Tag> tag_pool;
 
-          // set all ops to be the same proxy and only change if I'm op 0
-          for (size_t j = 0; j < FLAGS_concurrency; j++) {
-            ops[j]->cur_px_conn = op->cur_px_conn;
-          }
-          return;
+    void allocate_ops() {
+        for (size_t i = 0; i < FLAGS_concurrency; i++) {
+            ops[i] = new Operation(i);
         }
-      }
     }
-  }
 
-  ~ClientContext() {
-    LOG_INFO("Destructing the client context for %zu\n", thread_id);
-    for (size_t i = 0; i < FLAGS_concurrency; i++) {
-      delete ops[i];
+    void next_proxy(Operation *op) {
+        size_t tmp = op->cur_px_conn;
+        for (size_t i = 0; i < 3; i++) {
+            op->cur_px_conn = (op->cur_px_conn + 1) % 3;
+            if (this->alive_reps[op->cur_px_conn]) {
+                debug_print(1, "[%zu] Switching from %zu to %zu, op %zu\n",
+                        thread_id, tmp, op->cur_px_conn, op->local_idx);
+                return;
+            }
+        }
+
+        // Will never print
+        LOG_INFO("Thread: %zu cid %d all proxies declared DEAD\n", thread_id, client_id);
     }
-    free(stats);
-  }
 
-  void push_and_update_highest_cons_req_id(client_reqid_t rid) {
-    done_req_ids.push(rid);
-    while (!done_req_ids.empty() &&
-           (done_req_ids.top() == highest_cons_reqid + 1 ||
-            done_req_ids.top() == highest_cons_reqid)) { // handle duplicates...
-      highest_cons_reqid = done_req_ids.top();
-      done_req_ids.pop();
+    ~ClientContext() {
+        LOG_INFO("Destructing the client context for %zu\n", thread_id);
+        for (size_t i = 0; i < FLAGS_concurrency; i++) {
+            delete ops[i];
+        }
+        free(stats);
     }
-  }
 
-  void print_stats();
+    void push_and_update_highest_cons_req_id(client_reqid_t rid) {
+        done_req_ids.push(rid);
+        while (!done_req_ids.empty() &&
+               (done_req_ids.top() == highest_cons_reqid + 1 ||
+                done_req_ids.top() == highest_cons_reqid)) { // handle duplicates...
+            highest_cons_reqid = done_req_ids.top();
+            done_req_ids.pop();
+        }
+    }
+
+    void print_stats();
 };
 
 
 inline void
 Tag::alloc_msgbufs(ClientContext *_c, Operation *_op) {
-  this->c = _c;
-  this->op = _op;
+    this->c = _c;
+    this->op = _op;
 
-  size_t bufsize = client_payload_size( nsequence_spaces);
+    size_t bufsize = sizeof(client_payload_t);
 
-  if (!msgbufs_allocated) {
-    req_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
-    resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
-    msgbufs_allocated = true;
-  }
+    if (!msgbufs_allocated) {
+        LOG_INFO("Allocating msg_bufs for the first time op rid %zu size %zu\n", op->local_reqid, bufsize);
+        req_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
+        resp_msgbuf = c->rpc->alloc_msg_buffer_or_die(bufsize);
+        msgbufs_allocated = true;
+    }
+
+    c->rpc->resize_msg_buffer(&req_msgbuf, bufsize);
+    c->rpc->resize_msg_buffer(&resp_msgbuf, bufsize);
 }
 
 
-Tag::~Tag() {}
+Tag::~Tag() {
+    LOG_INFO("Destructing Tag?\n");
+}
 
 // added for more accurate timing
 const int SEC_TIMER_US = 1000000;
@@ -266,12 +270,14 @@ class Timer {
   }
 
   bool expired() {
+    // can't expire if it wasn't running?
     if (!running) return false;
     uint64_t curr_tsc = erpc::rdtsc();
     return curr_tsc - prev_tsc > timeout_tsc;
   }
 
   bool expired_reset() {
+    // can't expire if it wasn't running?
     if (!running) return false;
     uint64_t curr_tsc = erpc::rdtsc();
     if (curr_tsc - prev_tsc > timeout_tsc) {
@@ -281,6 +287,7 @@ class Timer {
   }
 
   bool expired_stop() {
+    // can't expire if it wasn't running?
     if (!running) return false;
     uint64_t curr_tsc = erpc::rdtsc();
     if (curr_tsc - prev_tsc > timeout_tsc) {
