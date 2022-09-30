@@ -23,7 +23,7 @@ cp ./*.cc $APPS_DIR
 cp ./*.h $APPS_DIR
 cp ../common.h $APPS_DIR
 cp ../logger.h $APPS_DIR
-cp ../bitmap.h $APPS_DIR # not needed for client
+#cp ../bitmap.h $APPS_DIR # not needed for client
 
 cd $ERPC_DIR
 echo $COMPONENT > scripts/autorun_app_file
