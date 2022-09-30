@@ -36,13 +36,16 @@ Once an experiment is swapped in `cd` into the `setup/` directory. If in the pro
 Then run `python3 parse_machine_list.py [your Emulab username]`. This script parses the list of machines from `machine_list.txt`, sets up hugepages and DPDK, and outputs `machine_info.txt`. Ensure setup completed successfully with status 0.
 
 # How to run an experiment
+Before running experiments ensure the `results/` directory exists.
+
 Setting `kSessionCredits` and `kSessionReqWindow` in `eRPC/src/sm_types.h` properly is important for performance. 
 `kSessionCredits` is limited by the number of connections for each component; so it depends on the application and the component.
-For the best performance on Emulab d430s with DPDK use 128 for all clients except Corfu clients which use 32. Proxies always use 16. Master branch sequencer uses 8. Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer.
+For the best performance on Emulab d430s with DPDK use 128 for all clients except Corfu clients which use 32 and when running recovery which should use 64. Proxies always use 16. Master branch sequencer uses 8. Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer. Note that clients must have `--client_concurrency <= kSessionCredits` otherwise proxies may deadlock waiting for client requests to ensure client-determined order.
 
-To build each component cd into the component's directory and run `make`.
+To build each component: set its `kSessionCredits` correctly, cd into the component's directory and run `make`.
 
 Run experiments with `python3 run_experiment.py [your Emulab username]`.
-Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
+Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper. When scale is increased `kSessionCredits` must be reduced (as above) to allow for more connections.
+
 # How to parse data
 Run `bash parse_datfiles.sh results` to aggregate the throughput and show median client latencies. Output is `aggregrate-throughput 50 99 99.9 99.99 percentile`.
