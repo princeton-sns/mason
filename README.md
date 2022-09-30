@@ -12,7 +12,7 @@ This repo contains 5 branches:
 
 ...plus setup scripts and scripts for parsing results.
 
-This repo also contains a modified version of [eRPC](https://github.com/erpc-io/eRPC) and uses code from [willemt/raft](https://github.com/willemt/raft) which is contained in the Emulab disk image.
+This repo also contains a modified version of [eRPC](https://github.com/erpc-io/eRPC) and [willemt/raft](https://github.com/willemt/raft).
 
 # Setting up machines
 These instructions are for Mason on Emulab with d430s running Ubuntu 18.04. These directions install and configure DPDK/hugepages for use with eRPC, and gather information from each machine to facilitate automated experiment-launching. 
