@@ -42,5 +42,15 @@ To build each component cd into the component's directory and run `make`.
 
 Run experiments with `python3 run_experiment.py [your Emulab username]`.
 Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
+
+For Figure 2 choose a sequence space count and to double throughput double `--nproxies` and `--nproxy_leaders` and double the load `--nclients`.
+
+For Figure 3 double `--ncorfu_servers --nproxies --nproxy_leaders --nclients`.
+
+For Figure 4 double `--nservers --nproxies --nproxy_leaders --nclients`. 
+
+`--nclient_concurrency` may need to be varied to find the right throughput/latency tradeoff.
+
+For Figure 5 (recovery) set `#define PLOT_RECOVERY 1` in common.h when building the components. This flag makes proxies connect to clients to send them noops and clients to record received sequence numbers. Run `python3 run_experiment.py [your Emulab username] --client_concurrency 8 --nclient_threads 16 --expduration 30 --nproxies 6 --nclients 4 --nsequence_spaces 4 --kill_leader 6 --nproxy_threads 8 --nproxy_leaders 16 --kill_sequencer 16 --exp_duration 30` which kills a proxy leader and the sequencer 10 and 20 seconds into the experiment, respectively, after waiting 4 seconds for warmup. Then `cd` to `recovery/` and run `bash create_recovery_plot.sh`.
 # How to parse data
 Run `bash parse_datfiles.sh results` to aggregate the throughput and show median client latencies. Output is `aggregrate-throughput 50 99 99.9 99.99 percentile`.
