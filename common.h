@@ -47,7 +47,7 @@
 #define MAX_PROXIES 32
 #define USEC_PER_SEC 1000000
 
-#define PLOT_RECOVERY 1
+#define PLOT_RECOVERY 0
 #define CHECK_FIFO 0
 
 #ifndef DUAL_PHY_PORTS
