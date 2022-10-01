@@ -632,7 +632,7 @@ if __name__ == "__main__":
                         help=('Number of proxy machines to use in this experiment. ' +
                         'Must be less than the number of available proxy machines.'),
                         type=int,
-                        default=3)
+                        default=18)
     parser.add_argument('--nproxy_threads',
                         help=('Number of proxy threads to run per machine.'),
                         type=int,
@@ -640,7 +640,7 @@ if __name__ == "__main__":
     parser.add_argument('--nproxy_leaders',
                         help=('Total number of leaders in the system.'),
                         type=int,
-                        default=8)
+                        default=48)
     parser.add_argument('--nbackend_servers',
                         help=('Number of backend servers for proxies to connect to.'),
                         type=int,
@@ -649,7 +649,7 @@ if __name__ == "__main__":
                         help=('Number of clients to run, clients are assigned to proxies in ' +
                             'round-robin fashion.'),
                         type=int,
-                        default=1)
+                        default=6)
     parser.add_argument('--client_concurrency',
                         help=('Number of outstanding requests a client can have at once.'),
                         type=int,
