@@ -14,7 +14,7 @@ namespace erpc {
 // Proxies always use 16
 // Corfu's sequencer and servers use 8
 // CorfuMason/ZK-Mason uses 4 for servers and the sequencer
-static constexpr size_t kSessionCredits = 8;
+static constexpr size_t kSessionCredits = SESSION_CREDITS;
 
 static_assert(is_power_of_two(kSessionCredits), "");
 
