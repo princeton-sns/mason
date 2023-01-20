@@ -28,7 +28,7 @@ cp ../bitmap.h $APPS_DIR # not needed for client
 cd $ERPC_DIR
 echo $COMPONENT > scripts/autorun_app_file
 
-cmake . -DPERF=ON -DTRANSPORT=dpdk -DCOMMON_DIR=$COMMON_DIR -DLOGGER_DIR=$LOGGER_DIR -DLOG_LEVEL="warn" #-DSESSION_CREDITS=$SESSION_CREDITS -DLOG_LEVEL="warn"
+cmake . -DPERF=ON -DTRANSPORT=dpdk -DCOMMON_DIR=$COMMON_DIR -DLOGGER_DIR=$LOGGER_DIR -DLOG_LEVEL="warn" -DSESSION_CREDITS=$SESSION_CREDITS #-DLOG_LEVEL="warn"
 make -j -I /usr/include/boost/ -lboost_serialization
 
 cp build/$COMPONENT $SRC_DIR
