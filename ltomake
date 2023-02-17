@@ -2,12 +2,20 @@
 set -e 
 
 COMPONENT=$1
+echo $COMPONENT
 
 if [ $COMPONENT == client ]
 then
     SESSION_CREDITS=128
-else
+elif [ $COMPONENT == proxy ]
+then
     SESSION_CREDITS=32
+elif [ $COMPONENT == sequencer ]
+then
+    SESSION_CREDITS=8
+elif [ $COMPONENT == server ]
+then
+    SESSION_CREDITS=8
 fi
 
 
