@@ -137,7 +137,7 @@ enum class ReqType : uint8_t {
 #define MAX_ZNODE_DATA 8
 #define MAX_ZK_SHARDS 16
 
-uint8_t kZKReplicationFactor = 3;
+const uint8_t kZKReplicationFactor = 3;
 
 // I am deciding znode name are not allowed to end in "/".
 std::string get_parent(std::string name) {
@@ -533,7 +533,12 @@ class AppMemPool {
   std::vector<T *> pool;
 
   void extend_pool() {
-    T *backing_ptr = new T[num_to_alloc];
+    T *backing_ptr;
+    try{
+      backing_ptr = new T[num_to_alloc];
+    } catch(std::bad_alloc&) {
+      fmt_rt_assert(false, "AppMemPool alloc of %zu failed\n", num_to_alloc);
+    }
     for (size_t i = 0; i < num_to_alloc; i++) pool.push_back(&backing_ptr[i]);
     backing_ptr_vec.push_back(backing_ptr);
     num_to_alloc *= 2;
