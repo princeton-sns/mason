@@ -387,7 +387,7 @@ Proxy::update_ackd_reqids(uint16_t cid, int64_t ackd_crid) {
       }
     }
     erpc::rt_assert(cop != nullptr, "We got a ClientOp nullptr???\n");
-
+  
     auto *b = cop->batch;
     // every client request has been ackd
     // returns true if this batch is now completely ackd
@@ -1069,6 +1069,9 @@ void one_shot_cont_func(void *, void *_t) {
     }
   }
 
+  Proxy *p = tag->op->proxy;
+  p->n_outstanding_requests[tag->shard][tag->shard_i]--;
+
   // if we received a response from each shard we can delete things
   for (size_t reps : replies) {
     if (reps != kZKReplicationFactor) {
@@ -1096,21 +1099,17 @@ void read_node_cont_func(void *, void *_t) {
   erpc::rt_assert(replies.size() == 1, "Not 1 shard for write request?");
   // check if have quorum from all, if so can return to client
   if (!*tag->returned_to_client) {
-    bool got_quorum = true;
-    // loop through each shard in replies, if any are < 2 got_quorum is false
-    for (size_t shard_reps : replies) {
-      if (shard_reps < 2)
-        got_quorum = false;
-    }
-    if (got_quorum) {
+    // getData does not need to wait for a quorum of responses, only one
       tag->op->zk_payload.read_node.version =
           *reinterpret_cast<int32_t *>(tag->resp_msgbuf.buf);
       memcpy(tag->op->zk_payload.read_node.data,
              tag->resp_msgbuf.buf + sizeof(int32_t), MAX_ZNODE_DATA);
       submit_operation_cont_func(nullptr, reinterpret_cast<void *>(tag->op));
       *tag->returned_to_client = true;
-    }
   }
+
+  Proxy *p = tag->op->proxy;
+  p->n_outstanding_requests[tag->shard][tag->shard_i]--;
 
   // check each shard and then reply to client or whatever if response from each
   for (size_t reps : replies) {
@@ -1232,12 +1231,23 @@ void send_req_to_shard(ClientOp *op, size_t shard, size_t shard_idx,
                        bool *returned_to_client, seq_req_t *seq_reqs, void *buf,
                        size_t buf_size, erpc::erpc_cont_func_t cont_func) {
   auto *c = op->c;
+  auto *p = op->proxy;
   // for each node in the shard
   for (size_t i = 0; i < kZKReplicationFactor; i++) {
+    if (op_type == OpType::kWriteNode) {
+      // don't send if there are too many outstanding requests
+      // only one replica will be behind
+      if (unlikely(p->n_outstanding_requests[shard][i] > kMaxOutstandingReqs)) {
+        continue;
+      }
+    }
+
     Tag *tag = op->proxy->tag_pool.alloc();
     tag->alloc_msgbufs(c);
     c->rpc->resize_msg_buffer(&tag->req_msgbuf, buf_size);
     tag->my_shard_idx = shard_idx;
+    tag->shard = shard;
+    tag->shard_i = i;
     tag->replies = replies;
     tag->returned_to_client = returned_to_client;
     tag->op = op;
@@ -1251,6 +1261,7 @@ void send_req_to_shard(ClientOp *op, size_t shard, size_t shard_idx,
                     "not connected to zk server trying to send to\n");
     c->rpc->enqueue_request(session_num, op_type, &tag->req_msgbuf,
                             &tag->resp_msgbuf, cont_func, tag);
+    p->n_outstanding_requests[shard][i]++;
   }
 }
 
@@ -2329,11 +2340,11 @@ signal_handler(int signum) {
   }
   if (signum == SIGSEGV || signum == SIGABRT) {
 
-    void *array[10];
+    void *array[100];
     int size;
 
     // get void*'s for all entries on the stack
-    size = backtrace(array, 10);
+    size = backtrace(array, 100);
 
     // print out all the frames to stderr
     if (signum == SIGSEGV) {
@@ -2343,22 +2354,28 @@ signal_handler(int signum) {
     }
 
     backtrace_symbols_fd(array, size, STDERR_FILENO);
+    fflush(stdout);
     erpc::rt_assert(false, "exit");
   }
   if (signum == SIGBUS) {
     fflush(stdout);
-    void *array[10];
+    void *array[100];
     int size;
 
     // get void*'s for all entries on the stack
-    size = backtrace(array, 10);
+    size = backtrace(array, 100);
 
     // print out all the frames to stderr
-    fprintf(stderr, "SIGBUS: signal %d:\n", signum);
-    backtrace_symbols_fd(array, size, STDERR_FILENO);
-    erpc::rt_assert(false, "exit");
+    auto strings = backtrace_symbols(array, size);
+    char output[2048];
+    auto off = 0;
+    for (auto i = 0; i < size; i++) {
+      off += sprintf(output+off, "%s\n", strings[i]);
+    }
+    fprintf(stderr, "SIGBUS: %s\n", output);
+    fflush(stderr);
+    erpc::rt_assert(false, "SIGBUS");
   }
-  fflush(stdout);
 }
 
 int
@@ -2370,13 +2387,13 @@ main(int argc, char **argv) {
   printf("Size of batch struct: %zu\n", sizeof(Batch));
   printf("Size of tag struct: %zu\n", sizeof(Tag));
 
-  LOG_INFO("cp %zu sr %zu readdel %zu ac %zu cn %zu r %zu cmdata %zu tot %zu\n",
+  LOG_INFO("cp %zu sr %zu readdel %zu ac %zu cn %zu r %zu cmdata %zu tot %zu kMaxStatic %zu respmsgbufalloc %zu\n",
            sizeof(client_payload_t), sizeof(seq_req_t), sizeof(delete_node_t),
            sizeof(add_child), sizeof(create_node_t), sizeof(app_appendentries_t),
            sizeof(client_mdata_t),
            sizeof(client_payload_t) + sizeof(seq_req_t) + sizeof(delete_node_t) +
            sizeof(add_child) + sizeof(create_node_t) + sizeof(app_appendentries_t) +
-           sizeof(client_mdata_t));
+           sizeof(client_mdata_t), kMaxStaticMsgSize, kMaxGetChildrenSize + sizeof(client_payload_t));
 
   printf("app_stats_t size: %zu\n", sizeof(app_stats_t));
   fflush(stdout);
@@ -2385,6 +2402,7 @@ main(int argc, char **argv) {
   signal(SIGINT, signal_handler);
   signal(SIGTERM, signal_handler);
   signal(SIGSEGV, signal_handler);
+  signal(SIGBUS, signal_handler);
 
   printf("Parsing command line args...\n");
   gflags::ParseCommandLineFlags(&argc, &argv, true);

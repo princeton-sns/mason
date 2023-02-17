@@ -30,6 +30,7 @@ extern double freq_ghz;
 #define MAX_OPS_PER_BATCH 512
 #define MAX_OUTSTANDING_AE 16 // prevent unacked requests from growing
 const int kRaftElectionTimeout = 3000;
+const size_t kMaxOutstandingReqs = 5120;
 
 #define NO_ERPC (MOCK_DT && MOCK_CLI && MOCK_SEQ)
 
@@ -395,6 +396,10 @@ class Tag {
   seq_req_t *seq_reqs;
   size_t my_shard_idx;
 
+  // to track outstanding requests to a replica
+  size_t shard;
+  size_t shard_i;
+
   // added for unsequenced operations
   erpc::ReqHandle *req_handle;
 
@@ -713,6 +718,10 @@ class Proxy {
                      std::priority_queue<
                          ClientOp *, std::vector<ClientOp *>, CmpCrid>>
       op_queues;
+
+  // if the proxy has over kMaxOutstandingRequests to a replica
+  // then we don't send
+  std::vector<std::vector<size_t>> n_outstanding_requests;
 
   /**
    * raft state
@@ -1365,6 +1374,8 @@ void Proxy::serialize(Archive &ar, const unsigned int) {
   if (Archive::is_saving::value) c->check_gc_timer();
   ar & dummy_entry_response;
   if (Archive::is_saving::value) c->check_gc_timer();
+  ar & n_outstanding_requests;
+  if (Archive::is_saving::value) c->check_gc_timer();
   // could split this into two function save() and load() via Boost
   for (size_t i = 0; i < nsequence_spaces; i++) {
     if (Archive::is_saving::value) {
@@ -1556,6 +1567,12 @@ Proxy::Proxy(WorkerContext *ctx, bool a, int p) {
 
   debug_print(DEBUG_SEQ, "New logical proxy as %s with pid %d\n",
               am_leader ? "leader" : "follower", p);
+
+  auto nshards = c->zk_ips.size()*N_ZKTHREADS/kZKReplicationFactor;
+  n_outstanding_requests.resize(nshards);
+  for (size_t i = 0; i < n_outstanding_requests.size(); i++) {
+    n_outstanding_requests[i].resize(kZKReplicationFactor);
+  }
 
   // initialize Raft
   cycles_per_msec = erpc::ms_to_cycles(1, erpc::measure_rdtsc_freq());
