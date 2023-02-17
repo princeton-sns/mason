@@ -99,7 +99,7 @@ def get_machine_info():
                 'machineid': machineid
         }
 
-        ssh = " ".join(fields[6:])
+        ssh = " ".join(fields[6:]) + " -o StrictHostKeyChecking=no "
         print("SSH command: " + ssh)
 
         ctrl_ip = get_ctrl_ip(ssh)
@@ -188,7 +188,7 @@ def setup_machines(whoami, args):
         setup_cmd = ("cd %s; sudo bash dpdk_apt_setup.sh %s %s" % 
                 (home, machines[machine]['iface1'], machines[machine]['iface2']))
 
-        ssh = "ssh %s@%s.emulab.net" % (whoami, machineid)
+        ssh = "ssh %s@%s.emulab.net" % (whoami, machineid) + " -o StrictHostKeyChecking=no "
         setup_cmd = "%s '%s'" % (ssh, setup_cmd)
         p = subprocess.Popen(shlex.split(setup_cmd))
         
