@@ -36,7 +36,7 @@ Then run `python3 parse_machine_list.py [your Emulab username]`. This script par
 # How to run an experiment
 Setting `kSessionCredits` and `kSessionReqWindow` in `eRPC/src/sm_types.h` properly is important for performance. 
 `kSessionCredits` is limited by the number of connections for each component; so it depends on the application and the component.
-For the best performance on Emulab d430s with DPDK use 128 for all clients except Corfu clients which use 32. Proxies always use 16. Master branch sequencer uses 8. Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer.
+For the best performance on Emulab d430s with DPDK use 128 for all clients except Corfu clients which use 32. Proxies always use 16. Master branch sequencer uses 8. Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer. Note that clients must have `--client_concurrency <= kSessionCredits` otherwise proxies may deadlock waiting for client requests to ensure client-determined order.
 
 To build each component cd into the component's directory and run `make`.
 
