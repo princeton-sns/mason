@@ -17,12 +17,14 @@ This repo also contains a modified version of [eRPC](https://github.com/erpc-io/
 # Setting up machines
 These instructions are for Mason on Emulab with d430s running Ubuntu 18.04. These directions install and configure DPDK/hugepages for use with eRPC, and gather information from each machine to facilitate automated experiment-launching. 
 
-First, create an Emulab profile with d430s connected with 10Gb NICs, with nodes: sequencer-0, sequencer-1, proxy-#, client-#, server-#. 
-You can create a profile in Emulab with the genilib script in `emulab_genilib` to do this.
+On Emulab use the `mason` profile under the project `Mason`. 
+This profile contains d430s connected with 10Gb NICs, with nodes: sequencer-0, sequencer-1, proxy-#, client-#, server-#. 
+There is also a genilib script `emulab_genilib` in this repository you can use to create the same profile.
 Proxies should be a multiple of 3, servers a multiple of 2 for Corfu and 3 for ZooKeeper.
 The default machine numbers are a minimal setup for ZK-Mason.
 
-Once an experiment is swapped in `cd` into the `setup/` directory. Copy the experiment "List View" from Emulab into `setup/machine_list.txt`. The file should look something like this:
+Once an experiment is swapped in `cd` into the `setup/` directory in this repo.
+Copy the experiment "List View" from Emulab into `setup/machine_list.txt`. The file should look something like this:
 
     sequencer-0	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
     sequencer-1	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
