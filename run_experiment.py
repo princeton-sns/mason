@@ -272,7 +272,7 @@ class Experiment:
             # launch
             corfu_server_name = me['name']
 
-            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+            ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                                   me['machineid'])
 
             assert(self.ncorfu_servers > 0)
@@ -302,7 +302,7 @@ class Experiment:
         machine_type = machine_name.split("-")[0]
         machine_ip = machine['ctrl_ip']
 
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                               machineid)
 
         cmd = ("cd %s;" % os.path.join(os.getcwd(), machine_type) +
@@ -334,7 +334,7 @@ class Experiment:
         client_dir = os.path.join(self.home, 'client')
 
 
-        ssh = ("ssh -p 22 %s@%s.emulab.net" % (self.whoami, machineid))
+        ssh = ("ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, machineid))
         cmd = ("cd %s;" % client_dir +
                " %s" % self.numactl_string +
                " ./client" +
@@ -370,7 +370,7 @@ class Experiment:
         proxy_name = this_proxy['name']
         client_ip = self.available_clients[self.client_list[0]]['ctrl_ip']
 
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                               this_proxy['machineid'])
 
         assert(self.nproxy_threads > 0)
@@ -486,7 +486,7 @@ class Experiment:
                 self.available_clients.items(),
                 self.available_corfu_servers.items()):
             print("Killing %s..." % machine_name)
-            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+            ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                                   machine_info['machineid'])
             if 'sequencer-' in machine_name:
                 kill_keyword = '[s]equencer'
