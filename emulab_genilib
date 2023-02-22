@@ -34,7 +34,7 @@ nodes = [request.RawPC(node) for node in sequencers + clients + proxies + server
 
 for i, node in enumerate (nodes): 
     node.hardware_type = 'd430'
-    node.disk_image = "" # place disk image URN here
+    node.disk_image = "urn:publicid:IDN+emulab.net+image+Mason//ubuntu-go1.18.5"
 
 ifaces1 = [node.addInterface('eth1', pg.IPv4Address('10.1.1.%d' % (i + 1),'255.255.255.0'))
             for i, node in enumerate(nodes)]
