@@ -45,13 +45,20 @@ To build each component cd into the component's directory and run `make`.
 Run experiments with `python3 run_experiment.py [your Emulab username]`.
 Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
 
-For Figure 2 choose a sequence space count and to double throughput double `--nproxies` and `--nproxy_leaders` and double the load `--nclients`.
+For Figure 3 choose a sequence space count and to double throughput double `--nproxies` and `--nproxy_leaders` and double the load `--nclients`.
 
-For Figure 3 double `--ncorfu_servers --nproxies --nproxy_leaders --nclients`.
+For Figure 4 double `--ncorfu_servers --nproxies --nproxy_leaders --nclients`.
 
-For Figure 4 double `--nservers --nproxies --nproxy_leaders --nclients`. 
+For Figure 5 double `--nservers --nproxies --nproxy_leaders --nclients`. 
 
 `--nclient_concurrency` may need to be varied to find the right throughput/latency tradeoff.
+
+There are 3 hardcoded parameters for ZK-Mason getData experiments that neet to be set based on the number of ZK-Mason shards in the experiment: INIT_N_BLOCKS in common.h which controls the initial number of blocks in the bitmap that hols received sequence numbers, BYTES_PER_BLOCK in common.h which controls the size of the blocks, and GC_TIMER_US in proxy/proxy.h which controls how often the garbage collection leader proxy initiates garbage collection. They should be set to the following before compiling components:
+
+    1 shard: 	INIT_N_BLOCKS: 1, BYTES_PER_BLOCK 65536,    GC_TIMER_US: 10000
+    2 shards: 	INIT_N_BLOCKS: 8, BYTES_PER_BLOCK 65536*16, GC_TIMER_US: 10000
+    4 shards: 	INIT_N_BLOCKS: 8, BYTES_PER_BLOCK 65536*16, GC_TIMER_US: 100000
+    8 shards: 	INIT_N_BLOCKS: 1, BYTES_PER_BLOCK 65536,    GC_TIMER_US: 10000
 
 For Figure 5 (recovery) set `#define PLOT_RECOVERY 1` in common.h when building the components. This flag makes proxies connect to clients to send them noops and clients to record received sequence numbers. Run `python3 run_experiment.py [your Emulab username] --client_concurrency 8 --nclient_threads 16 --expduration 30 --nproxies 6 --nclients 4 --nsequence_spaces 4 --kill_leader 6 --nproxy_threads 8 --nproxy_leaders 16 --kill_sequencer 16` which kills a proxy leader and the sequencer 10 and 20 seconds into the experiment, respectively, after waiting 4 seconds for warmup. Then `cd` to `recovery/` and run `bash create_recovery_plot.sh`. You may need to install the `numpy` and `pandas` python3 packages. `pip3 install [package]`.
 # How to parse data
