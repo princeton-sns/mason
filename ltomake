@@ -6,10 +6,16 @@ COMPONENT=$1
 if [ $COMPONENT == client ]
 then
     SESSION_CREDITS=128
-else
-    SESSION_CREDITS=32
+elif [ $COMPONENT == proxy ]
+then
+    SESSION_CREDITS=16
+elif [ $COMPONENT == sequencer ]
+then
+    SESSION_CREDITS=4
+elif [ $COMPONENT == corfu_server ]
+then
+    SESSION_CREDITS=4
 fi
-
 
 SRC_DIR=`pwd`
 COMMON_DIR=`cd ../; pwd`
