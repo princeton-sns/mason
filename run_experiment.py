@@ -282,7 +282,7 @@ class Experiment:
             # launch
             corfu_server_name = me['name']
 
-            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+            ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                                   me['machineid'])
 
             assert(self.nzk_servers > 0)
@@ -314,7 +314,7 @@ class Experiment:
         machine_type = machine_name.split("-")[0]
         machine_ip = machine['ctrl_ip']
 
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                               machineid)
 
         cmd = ("cd %s;" % os.path.join(os.getcwd(), machine_type) +
@@ -347,7 +347,7 @@ class Experiment:
         client_dir = os.path.join(self.home, 'client')
 
 
-        ssh = ("ssh -p 22 %s@%s.emulab.net" % (self.whoami, machineid))
+        ssh = ("ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, machineid))
         cmd = ("cd %s;" % client_dir +
                " %s" % self.numactl_string +
                " ./client" +
@@ -394,7 +394,7 @@ class Experiment:
             client_ips += '%s,' % self.available_clients[client]['ctrl_ip']
         client_ips = client_ips[:-1]
 
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                               this_proxy['machineid'])
 
         assert(self.nproxy_threads > 0)
@@ -524,7 +524,7 @@ class Experiment:
             #     continue
 
             print("Killing %s..." % machine_name)
-            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami,
+            ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami,
                                                   machine_info['machineid'])
             if 'sequencer-' in machine_name:
                 kill_keyword = '[s]equencer'
@@ -580,7 +580,7 @@ class Experiment:
         time.sleep(time_to_kill)
 
         # kill the sequencer now
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.primary_sequencer['machineid'])
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.primary_sequencer['machineid'])
         kill_keyword = '\./[s]equencer'
         cmd = "%s 'sudo pkill -f -9 \"%s\"'" % (ssh, kill_keyword)
         print(cmd)
@@ -600,7 +600,7 @@ class Experiment:
 
         print("killing a leader for failover... %s" % self.available_proxies[self.proxy_list[0]])
         # kill a leader now
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.available_proxies[self.proxy_list[0]]['machineid'])
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.available_proxies[self.proxy_list[0]]['machineid'])
         kill_keyword = 'proxy'
         cmd = "%s 'sudo pkill -f -9 \"./%s\"'" % (ssh, kill_keyword)
         cmd = shlex.split(cmd)
@@ -623,7 +623,7 @@ class Experiment:
         for i in range(0, len(self.proxy_list), 3):
             print("killing a leader for failover... %s" % self.available_proxies[self.proxy_list[i]])
             # kill a leader now
-            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.available_proxies[self.proxy_list[i]]['machineid'])
+            ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.available_proxies[self.proxy_list[i]]['machineid'])
             kill_keyword = 'proxy'
             cmd = "%s 'sudo pkill -f -9 \"./%s\"'" % (ssh, kill_keyword)
             cmd = shlex.split(cmd)
