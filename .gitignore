@@ -25,3 +25,4 @@ sequencer/sequencer
 deptracker/deptracker
 temp-*
 recovery/*.pdf
+checkout-from-master.sh
