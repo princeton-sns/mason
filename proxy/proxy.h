@@ -23,7 +23,7 @@
 
 bool kUtilPrinting = true;
 bool kPrintTiming = false;
-bool kHeartbeats = true;
+bool kHeartbeats = false;
 
 extern double freq_ghz;
 
@@ -1636,7 +1636,8 @@ class WorkerContext : public ThreadContext {
   // takes n, but this should be the number of shards
   // there are nsequence_spaces shards == (nphys machines/3) * N_ZKTHREADS shards
   size_t znode_to_shard_idx(std::string name) {
-    return std::hash<std::string>{}(name) % zk_session_nums.size();
+    (void) name;
+    return 0; //std::hash<std::string>{}(name) % // zk_session_nums.size();
   }
 
   bool in_snapshot_requests_map(size_t rpc) {

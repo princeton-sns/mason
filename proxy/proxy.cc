@@ -1675,19 +1675,19 @@ establish_zk_connections(WorkerContext *c) {
   for (size_t i = 0; i < c->zk_session_nums.size(); i++)
     c->zk_session_nums[i].resize(kZKReplicationFactor);
 
-  size_t rep_num = 0;
-  size_t j = 0;
+  // size_t rep_num = 0;
+  // size_t j = 0;
 
   // for each shard
-  for (size_t i = 0; i < c->zk_ips.size(); i++) {
-    connect_to_zk_machine(c, i, rep_num, j);
+  // for (size_t i = 0; i < c->zk_ips.size(); i++) {
+  //   // connect_to_zk_machine(c, i, rep_num, j);
 
-    fmt_rt_assert(c->zk_session_nums.size() == nsequence_spaces,
-                  "nshards %zu != %zu nsequence_spaces\n",
-                  c->zk_session_nums.size(), nsequence_spaces);
-    rep_num = (rep_num + 1) % kZKReplicationFactor;
-    if (rep_num == 0) j += N_ZKTHREADS;
-  }
+  //   // fmt_rt_assert(c->zk_session_nums.size() == nsequence_spaces,
+  //   //               "nshards %zu != %zu nsequence_spaces\n",
+  //   //               c->zk_session_nums.size(), nsequence_spaces);
+  //   rep_num = (rep_num + 1) % kZKReplicationFactor;
+  //   if (rep_num == 0) j += N_ZKTHREADS;
+  // }
 
   printf("...done establishing ZooKeeper connections.\n");
 }
@@ -1731,7 +1731,7 @@ establish_cats_connections(WorkerContext *c, int remote_tid) {
   printf("Connecting to Rpcid %d on machines:", remote_tid);
 #if !MOCK_SEQ
   printf("\nsequencer: ");
-  connect_and_store_session(c, seq_ip, remote_tid, MachineIdx::SEQ);
+  // connect_and_store_session(c, seq_ip, remote_tid, MachineIdx::SEQ);
 #endif
 
   // If this is the 0th thread, connect to the 0th thread on the neighbor
@@ -1830,7 +1830,7 @@ thread_func(size_t tid, erpc::Nexus *nexus, app_stats_t *app_stats) {
   boost::split(c.client_ips, FLAGS_client_ips, boost::is_any_of(","));
   c.nclient_threads = FLAGS_nclient_threads;
 
-  establish_zk_connections(&c);
+  // establish_zk_connections(&c);
 
   // establish Raft connections,
   // ASSUMPTION: *** our peers have the same thread_id ***

@@ -55,11 +55,11 @@ class Experiment:
 
         # print([self.available_corfu_servers[x] for x in self.corfu_servers])
 
-        self.zk_ips = ''
-        for key in self.zk_servers_keys:
-            self.zk_ips += '%s,' % self.available_zk_servers[key]['ctrl_ip']
-        self.zk_ips = self.zk_ips[:-1]
-        print(self.zk_ips)
+        # self.zk_ips = ''
+        # for key in self.zk_servers_keys:
+        #     self.zk_ips += '%s,' % self.available_zk_servers[key]['ctrl_ip']
+        # self.zk_ips = self.zk_ips[:-1]
+        # print(self.zk_ips)
 
         # proxy stuff
         self.nproxy_threads = args.nproxy_threads
@@ -99,12 +99,12 @@ class Experiment:
         self.time_to_kill_all_leaders = args.kill_all_leaders
         self.only_kill_zombies = args.only_kill_zombies
 
-        sequencer_list = list(self.sequencers.keys())
-        self.primary_sequencer = self.sequencers[sequencer_list[0]]
-        if len(self.sequencers) > 1:
-            self.backup_sequencer = self.sequencers[sequencer_list[1]]
-        else:
-            self.backup_sequencer = {'ctrl_ip': ""}
+        # sequencer_list = list(self.sequencers.keys())
+        # self.primary_sequencer = self.sequencers[sequencer_list[0]]
+        # if len(self.sequencers) > 1:
+        #     self.backup_sequencer = self.sequencers[sequencer_list[1]]
+        # else:
+        #     self.backup_sequencer = {'ctrl_ip': ""}
 
         # adding an option to just kill_zombies
         if self.only_kill_zombies == 1:
@@ -403,7 +403,7 @@ class Experiment:
                # " valgrind -v -v -v" +
                " ./proxy" +
                " --my_ip %s" % this_proxy['ctrl_ip'] +
-               " --seq_ip %s" % self.primary_sequencer['ctrl_ip'] +
+            #    " --seq_ip %s" % self.primary_sequencer['ctrl_ip'] +
                " --nthreads %d" % self.nproxy_threads +
                " --batch_to %d" % self.batch_timeout +
                " --replica_1_ip %s" % replica_1_ip +
@@ -412,7 +412,7 @@ class Experiment:
                " --replica_1_raft_id %d" % replica_1_raft_id +
                " --replica_2_raft_id %d" % replica_2_raft_id +
                " --proxy_id_start %d" % proxy_id_start +
-               " --zk_ips %s" % self.zk_ips +
+            #    " --zk_ips %s" % self.zk_ips +
                " --client_ip %s" % client_ip +
                " --client_ips %s" % client_ips +
                " --nclient_threads %d" % self.nclient_threads +
@@ -422,8 +422,8 @@ class Experiment:
 
         print("self.nsequence_spaces %d args.nsequence_spaces %d"%
               (self.nsequence_spaces, args.nsequence_spaces))
-        if experiment.backup_sequencer['ctrl_ip'] != '':
-            cmd += " --backupseq_ip %s" % self.backup_sequencer['ctrl_ip']
+        # if experiment.backup_sequencer['ctrl_ip'] != '':
+        #     cmd += " --backupseq_ip %s" % self.backup_sequencer['ctrl_ip']
 
         if next_proxy0['ctrl_ip'] != '':
             cmd += " --nextproxy0_ip %s" % next_proxy0['ctrl_ip']
@@ -754,17 +754,17 @@ if __name__ == "__main__":
     # let's only set one of these for now
     assert(args.kill_all_leaders == -1 or args.kill_leader == -1)
 
-    sequencer_procs = experiment.launch_machines(experiment.sequencers)
+    # sequencer_procs = experiment.launch_machines(experiment.sequencers)
     proxy_procs = experiment.launch_proxies()
-    corfu_procs = experiment.launch_zk_servers()
+    # corfu_procs = experiment.launch_zk_servers()
 
     # Sleep to make sure the other processes are up
     time.sleep(4)
     client_procs = experiment.launch_clients()
 
     # start thread to time the killing of sequencer
-    kill_sequencer_process = multiprocessing.Process(
-        target=experiment.kill_sequencer)
+    # kill_sequencer_process = multiprocessing.Process(
+    #     target=experiment.kill_sequencer)
 
     kill_leader_process = multiprocessing.Process(
         target=experiment.kill_leader)
@@ -772,7 +772,7 @@ if __name__ == "__main__":
     kill_all_leaders_process = multiprocessing.Process(
         target=experiment.kill_all_leaders)
 
-    kill_sequencer_process.start()
+    # kill_sequencer_process.start()
     kill_leader_process.start()
     kill_all_leaders_process.start()
 

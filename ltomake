@@ -3,13 +3,8 @@ set -e
 
 COMPONENT=$1
 
-if [ $COMPONENT == client ]
-then
-    SESSION_CREDITS=128
-else
-    SESSION_CREDITS=32
-fi
-
+# all components can use 128 for RSMKeeper
+SESSION_CREDITS=128
 
 SRC_DIR=`pwd`
 COMMON_DIR=`cd ../; pwd`
