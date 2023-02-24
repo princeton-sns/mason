@@ -34,6 +34,18 @@ max_log_size,       10000,  The maximum size to keep proxy's log. Determines how
 nsequence_spaces,   5,      The number of sequence spaces we are running with.
 ```
 
+The `rsmkeeper` and `zk-mason` branches additionally have:
+```
+zk_ips,             "",     ZooKeeper IP addresses // unused in rsmkeeper
+client_ips,         "",     All of the clients IPs for watches
+nclient_threads,    0,      number of client threads per machine
+```
+
+The `corfumason` branch has:
+```
+corfu_ips,          "",     Corfu IP addresses
+```
+
 `../run_experiment.py` uses different defaults; flags should only be modified through `../run_experiment.py`.
 
 Three hardcoded flags relating to the proxy are: 
