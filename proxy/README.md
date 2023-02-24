@@ -6,32 +6,32 @@ and reply to the client.
 
 The flags to proxy are (flag, default, description):
 ```
-nthreads, 0, Number of worker threads to launch on this machine
-proxy_id_start, 0, Where proxy ids begin, 1 proxy group for each thread!
-nleaders, 0, Number of leaders to run on each worker thread
-nfollowers, 0, Number of followers to run on each worker thread
-nclients, 0, Max number of client threads that will be serviced on this machine
-nservers, 0, Max number of servers we will connect to with this machine
-am_gc_leader, false, Whether this proxy initiates garbage collection
-no_gc, false, Whether to do garbage collection
+nthreads,           0,      Number of worker threads to launch on this machine
+proxy_id_start,     0,      Where proxy ids begin, 1 proxy group for each thread!
+nleaders,           0,      Number of leaders to run on each worker thread
+nfollowers,         0,      Number of followers to run on each worker thread
+nclients,           0,      Max number of client threads that will be serviced on this machine
+nservers,           0,      Max number of servers we will connect to with this machine
+am_gc_leader,       false,  Whether this proxy initiates garbage collection
+no_gc,              false,  Whether to do garbage collection
 
 IP addresses
-my_ip, "", IP address for this machine
-nextproxy0_ip, "", IP address of next proxy in garbage collection ring
-nextproxy1_ip, "", IP address of next proxy in garbage collection ring
-nextproxy2_ip, "", IP address of next proxy in garbage collection ring
-seq_ip, "", IP address of sequencer
-backupseq_ip, "", IP address of backup sequencer
-replica_1_ip, "", IP address of replica 1
-replica_2_ip, "", IP address of replica 2
-client_ip, "", IP address of client for recording noop seqnums
+my_ip,              "",     IP address for this machine
+nextproxy0_ip,      "",     IP address of next proxy in garbage collection ring
+nextproxy1_ip,      "",     IP address of next proxy in garbage collection ring
+nextproxy2_ip,      "",     IP address of next proxy in garbage collection ring
+seq_ip,             "",     IP address of sequencer
+backupseq_ip,       "",     IP address of backup sequencer
+replica_1_ip,       "",     IP address of replica 1
+replica_2_ip,       "",     IP address of replica 2
+client_ip,          "",     IP address of client for recording noop seqnums
 
-batch_to, 1000, Batch timeout in us
-my_raft_id, 0, The unique Raft ID for this machine's proxy groups.
-replica_1_raft_id, 0, The unique Raft ID for this machine's first replica.
-replica_2_raft_id, 0, The unique Raft ID for this machine's second replica.
-max_log_size, 10000, The maximum size to keep proxy's log. Determines how often to snapshot.
-nsequence_spaces, 5, The number of sequence spaces we are running with.
+batch_to,           1000,   Batch timeout in us
+my_raft_id,         0,      The unique Raft ID for this machine's proxy groups.
+replica_1_raft_id,  0,      The unique Raft ID for this machine's first replica.
+replica_2_raft_id,  0,      The unique Raft ID for this machine's second replica.
+max_log_size,       10000,  The maximum size to keep proxy's log. Determines how often to snapshot.
+nsequence_spaces,   5,      The number of sequence spaces we are running with.
 ```
 
 `../run_experiment.py` uses different defaults; flags should only be modified through `../run_experiment.py`.
