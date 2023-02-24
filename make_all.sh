@@ -5,5 +5,5 @@ if [[ $* == *--eRPC* ]]; then
 fi
 cd proxy; make; cd ..
 cd client; make; cd ..
-cd sequencer; make; cd ..
-cd server; make; cd ..
+# cd sequencer; make; cd ..
+# cd server; make; cd ..
