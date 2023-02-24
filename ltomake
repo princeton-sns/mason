@@ -5,10 +5,7 @@ COMPONENT=$1
 
 if [ $COMPONENT == client ]
 then
-    SESSION_CREDITS=128
-elif [ $COMPONENT == proxy ]
-then
-    SESSION_CREDITS=16
+    SESSION_CREDITS=32
 elif [ $COMPONENT == sequencer ]
 then
     SESSION_CREDITS=4

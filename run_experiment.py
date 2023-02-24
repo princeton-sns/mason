@@ -209,15 +209,16 @@ class Experiment:
             # proxy_idx = global_threadid//self.nproxy_threads
             # proxy_threadid = global_threadid - proxy_idx * self.nproxy_threads
             proxy_threadid = 0  # dummy var
-            proxy_idx = j % nproxies
+            # proxy_idx = j % nproxies
+            proxy_idx = 0
 
             # proxy_name = self.proxy_list[proxy_idx]
             # proxy_info = self.available_proxies[proxy_name]
             # proxy_ip = proxy_info['ctrl_ip']
 
-            rep_ips[0] = self.available_proxies[self.proxy_list[(cnt) % len(self.proxy_list)]]['ctrl_ip']
-            rep_ips[1] = self.available_proxies[self.proxy_list[(cnt + 1) % len(self.proxy_list)]]['ctrl_ip']
-            rep_ips[2] = self.available_proxies[self.proxy_list[(cnt + 2) % len(self.proxy_list)]]['ctrl_ip']
+            # rep_ips[0] = self.available_proxies[self.proxy_list[(cnt) % len(self.proxy_list)]]['ctrl_ip']
+            # rep_ips[1] = self.available_proxies[self.proxy_list[(cnt + 1) % len(self.proxy_list)]]['ctrl_ip']
+            # rep_ips[2] = self.available_proxies[self.proxy_list[(cnt + 2) % len(self.proxy_list)]]['ctrl_ip']
 
             # this is so that clients are given to proxy groups (all proxy groups in proxy threads are on the same machine)
             # in round-robin order. todo Create some proxy group struct to get rid of the nasty bug-prone code!
@@ -241,14 +242,14 @@ class Experiment:
             client = self.available_clients[self.client_list[j]]
 
             # there better be a multiple of 3 proxies in the replicated setting
-            assert(self.nproxies%3 == 0)
+            # assert(self.nproxies%3 == 0)
             # proxy_id = j % (self.nproxies//3)
 
             # todo figure out proxy_id in the general case
-            p = self.launch_client(client, rep_ips[0], rep_ips[1], rep_ips[2], proxy_threadid, proxy_id_start)
+            p = self.launch_client(client, "","","",0,0) #rep_ips[0], rep_ips[1], rep_ips[2], proxy_threadid, proxy_id_start)
 
             # next group starts at where this one started plus threads per proxy machine, but want to wrap around by total threads
-            proxy_id_start = (proxy_id_start + self.nproxy_threads) % (self.nproxy_threads * (len(self.proxy_list)/3))
+            # proxy_id_start = (proxy_id_start + self.nproxy_threads) % (self.nproxy_threads * (len(self.proxy_list)/3))
 
             # todo there is a better way somehow
             # if (proxy_threadid == self.nproxy_threads):
@@ -345,10 +346,10 @@ class Experiment:
                " --nproxy_threads %d" % self.nproxy_threads +
                " --proxy_threadid %d" % proxy_threadid +
                " --expduration %d" % self.expduration +
-               " --proxy_ip_0 %s" % proxy_ip_0 +
+            #    " --proxy_ip_0 %s" % proxy_ip_0 +
                " --corfu_ips %s" % self.corfu_ips +
-               " --proxy_ip_1 %s" % proxy_ip_1 +
-               " --proxy_ip_2 %s" % proxy_ip_2 +
+            #    " --proxy_ip_1 %s" % proxy_ip_1 +
+            #    " --proxy_ip_2 %s" % proxy_ip_2 +
                " --seq_ip %s" % self.primary_sequencer['ctrl_ip'] +
                " --proxy_id %d" % proxy_id +
                " --max_log_position %d" % self.max_log_position +
@@ -634,7 +635,7 @@ if __name__ == "__main__":
                         help=('Number of proxy machines to use in this experiment. ' +
                         'Must be less than the number of available proxy machines.'),
                         type=int,
-                        default=3)
+                        default=0)
     parser.add_argument('--nproxy_threads',
                         help=('Number of proxy threads to run per machine.'),
                         type=int,
@@ -684,7 +685,7 @@ if __name__ == "__main__":
     assert(args.kill_all_leaders == -1 or args.kill_leader == -1)
 
     sequencer_procs = experiment.launch_machines(experiment.sequencers)
-    proxy_procs = experiment.launch_proxies()
+    # proxy_procs = experiment.launch_proxies()
     corfu_procs = experiment.launch_corfu_servers()
 
     # Sleep to make sure the other processes are up
