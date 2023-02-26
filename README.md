@@ -23,24 +23,41 @@ There is also a genilib script `emulab_genilib` in this repository you can use t
 Proxies should be a multiple of 3, servers a multiple of 2 for Corfu and 3 for ZooKeeper.
 The default machine numbers are a minimal setup for ZK-Mason.
 
-Once an experiment is swapped in `cd` into the `setup/` directory in this repo.
+Once an experiment is swapped in `ssh` into any node (e.g. proxy-0) and clone this repository; we recommend cloning into `/proj/your-project/` to avoid disk usage quota issues when running experiments. 
+
+On Emulab cloning to this directory or your home directory should clone it to every node through Emulab's NFS.
+Note: this did not work for one user and their solution was to modify `parse_machine_list.py` to clone the repo on each node: "Replace line 188 and 189 (https://github.com/masonj2022/mason/blob/24da3117d02270adbbd329873fb4514f605304fe/setup/parse_machine_list.py#L188) with `setup_cmd = ("cd ~; git clone https://github.com/masonj2022/mason; cd mason/setup; sudo bash dpdk_apt_setup.sh %s %s" % (machines[machine]['iface1'], machines[machine]['iface2']))` Alternatively, you can ssh into each machine and manually clone the repo before running the setup script."
+
+`cd` into the `setup/` directory in this repo.
 Copy the experiment "List View" from Emulab into `setup/machine_list.txt`. The file should look something like this:
 
-    sequencer-0	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
-    sequencer-1	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
-    proxy-0	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
-    proxy-1	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
-    proxy-2	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
-    client-0	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net		
+    sequencer-0	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
+    sequencer-1	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
+    proxy-0	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
+    proxy-1	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
+    proxy-2	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
+    client-0	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
 
 Then run `python3 parse_machine_list.py [your Emulab username]`. This script parses the list of machines from `machine_list.txt`, sets up hugepages and DPDK, and outputs `machine_info.txt`. Ensure setup completed successfully with status 0.
 
-# How to run an experiment
-Setting `kSessionCredits` and `kSessionReqWindow` in `eRPC/src/sm_types.h` properly is important for performance. 
-`kSessionCredits` is limited by the number of connections for each component; so it depends on the application and the component.
-For the best performance on Emulab d430s with DPDK use 128 for all clients except Corfu clients which use 32. Proxies always use 16. Master branch sequencer uses 8. Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer. Note that clients must have `--client_concurrency <= kSessionCredits` otherwise proxies may deadlock waiting for client requests to ensure client-determined order.
+When using the `parse_machine_list.py` script one user had an indexing issue which caused the an `ssh` command to be incorrect.
+If you run into this issue their solution was to change change the 6 to a 7 on line 102: `ssh = " ".join(fields[6:]) + " -o StrictHostKeyChecking=no "` -> `ssh = " ".join(fields[7:]) + " -o StrictHostKeyChecking=no "`.
 
-To build each component cd into the component's directory and run `make`.
+Note: some users experienced problems with `ssh` keys when using CloudLab. To solve these problems the user added an extra `ssh` key: "Add an extra ssh key to cloud lab (this is because the easiest way to setup ssh between cloud lab nodes in an experiment is to copy a private key onto one of the nodes); I created an additional/extra key so I can delete this key after the artifact evaluation for privacy/safety", `ssh`'ed into a node, and uploaded the private key "Upload your private ssh key onto the node and run the following commands: `chmod 600 /your/priv/key eval “$(ssh-agent -s)” ssh-add /your/priv/key"`.
+
+# How to run an experiment
+To make all components run `bash make_all.sh`.
+Setting `kSessionCredits` and `kSessionReqWindow` in `eRPC/src/sm_types.h` properly is important for performance. 
+`kSessionCredits` is limited by the number of connections for each component.
+`SESSION_CREDITS` in `ltomake` is a compile time parameter to set `kSessionCredits`. It is set for the largest configuration in each branch.
+If you modify `SESSION_CREDITS` for a component you need to `make clean` the component to rebuild the eRPC code.
+You can clean and make all components with `bash make_all.sh --clean`.
+<!-- For the best performance on Emulab d430s with DPDK use 128 for all clients except Corfu clients which use 32.
+Proxies always use 16. Master branch sequencer uses 8. 
+Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer. -->
+Note that if you are configuring `SESSION_CREDITS`, clients must have `--client_concurrency <= kSessionCredits` otherwise proxies may deadlock waiting for client requests to ensure client-determined order.
+
+To build each component cd into the component's directory and run `make` or run `bash make_all.sh`.
 
 Run experiments with `python3 run_experiment.py [your Emulab username]`.
 Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
