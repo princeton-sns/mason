@@ -27,10 +27,11 @@ for dir in $1/results-*; do
     echo $tput $lat $lat99 $lat999 $lat9999 
 
     tmp=`expr $tmp + 1`
-    if (( $tmp % 5 == 0 ))
-    then
-	    echo ''
-    fi
+    # we were running 5 trials and so put a blank line in between them, but for 1 trial it doesn't make sense.
+    # if (( $tmp % 5 == 0 ))
+    # then
+	#     # echo ''
+    # fi
 
     rm $fname
 

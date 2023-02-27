@@ -488,7 +488,7 @@ class Experiment:
 
         print("killing a leader for failover... %s" % self.available_proxies[self.proxy_list[0]])
         # kill a leader now
-        ssh = "ssh -p 22 %s@%s.emulab.ne -o StrictHostKeyChecking=no" % (self.whoami, self.available_proxies[self.proxy_list[0]]['machineid'])
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.available_proxies[self.proxy_list[0]]['machineid'])
         kill_keyword = 'proxy'
         cmd = "%s 'sudo pkill -f -9 \"./%s\"'" % (ssh, kill_keyword)
         cmd = shlex.split(cmd)

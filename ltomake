@@ -6,6 +6,17 @@ COMPONENT=$1
 if [ $COMPONENT == client ]
 then
     SESSION_CREDITS=128
+    ### 
+    # Uncomment the below line when running Figure 5, the recovery experiment!
+    # This needs to be set lower for the client because proxies, only for the 
+    # recovery experiment, make another connection to the client, 
+    # so SESSION_CREDITS needs to be lower or the proxies run out of eRPC Ring buffers.
+    #
+    # If you already built the client you will need to cd client; make clean; make; cd ..
+    #
+    # For recovery the PLOT_RECOVERY flag should be set to 1 in common.h
+    ###
+    # SESSION_CREDITS=64 
 elif [ $COMPONENT == proxy ]
 then
     SESSION_CREDITS=16
