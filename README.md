@@ -17,11 +17,39 @@ This repo also contains a modified version of [eRPC](https://github.com/erpc-io/
 # Setting up machines
 These instructions are for Mason on Emulab with d430s running Ubuntu 18.04. These directions install and configure DPDK/hugepages for use with eRPC, and gather information from each machine to facilitate automated experiment-launching. 
 
+First, the user should change their default shell to bash: on Emulab/CloudLab top right "your-user-name" drop down
+-> Manage Account -> Default Shell -> bash. It may take a few minutes for it to change.
+All of our scripts assume bash is the default shell.
+
 On Emulab use the `mason` profile under the project `Mason`. 
 This profile contains d430s connected with 10Gb NICs, with nodes: sequencer-0, sequencer-1, proxy-#, client-#, server-#. 
 There is also a genilib script `emulab_genilib` in this repository you can use to create the same profile.
+
+More explicit instructions from a previous user which work for Emulab as well as CloudLab (all of our experiment were conducted over Emulab):
+
+    You can find this profile on CloudLab as follows.
+    * From the menu, choose "Experiments -> Start Experiment".
+    * In the resulting screen, click "Change Profile".
+    * In the dialog, go to the search box (upper left) and enter "mason".
+    * Scroll down in the list if necessary, and choose the "Mason" profile.
+    Then click the "Select Profile" button and proceed with the usual experiment-instantiation process.
+
 Proxies should be a multiple of 3, servers a multiple of 2 for Corfu and 3 for ZooKeeper.
 The default machine numbers are a minimal setup for ZK-Mason.
+
+The largest setup is the corfumason 4 shard configuration with 2 sequencers (primary and standby),
+72 proxies, 24 clients, and 8 servers. 
+
+We recommend swapping in the largest setup (corfumason) and then modifying `setup/machine_info.txt` manually after setting up the machines with DPDK (described below):
+To assign nodes to a different role without terminating and restarting an experiment, after setting up the machines with DPDK, you can change the name manually in `machine_info.txt` and then use `run_experiment.py` (or `run_suite.sh`).
+
+The configuration for the largest evaluated setup in each branch are as follows:
+
+    master:     2 sequencers   48 proxies   16 clients   0  servers   (66  total)
+    corfu:      2 sequencers   0  proxies   16 clients   8  servers   (26  total)
+    corfumason: 2 sequencers   72 proxies   24 clients   8  servers   (106 total)
+    rsmkeeper:  0 sequencers   3  proxies   1  client    0  servers   (4   total)
+    zk-mason:   2 sequencers   48 proxies   16 clients   24 servers   (90  total)
 
 Once an experiment is swapped in `ssh` into any node (e.g. proxy-0) and clone this repository; we recommend cloning into `/proj/your-project/` to avoid disk usage quota issues when running experiments. 
 
@@ -40,7 +68,7 @@ Copy the experiment "List View" from Emulab into `setup/machine_list.txt`. The f
 
 Then run `python3 parse_machine_list.py [your Emulab username]`. This script parses the list of machines from `machine_list.txt`, sets up hugepages and DPDK, and outputs `machine_info.txt`. Ensure setup completed successfully with status 0.
 
-When using the `parse_machine_list.py` script one user had an indexing issue which caused the an `ssh` command to be incorrect.
+When using the `parse_machine_list.py` script, one user had an indexing issue which caused the an `ssh` command to be incorrect.
 If you run into this issue their solution was to change change the 6 to a 7 on line 102: `ssh = " ".join(fields[6:]) + " -o StrictHostKeyChecking=no "` -> `ssh = " ".join(fields[7:]) + " -o StrictHostKeyChecking=no "`.
 
 Note: some users experienced problems with `ssh` keys when using CloudLab. To solve these problems the user added an extra `ssh` key: "Add an extra ssh key to cloud lab (this is because the easiest way to setup ssh between cloud lab nodes in an experiment is to copy a private key onto one of the nodes); I created an additional/extra key so I can delete this key after the artifact evaluation for privacy/safety", `ssh`'ed into a node, and uploaded the private key "Upload your private ssh key onto the node and run the following commands: `chmod 600 /your/priv/key eval “$(ssh-agent -s)” ssh-add /your/priv/key"`.
@@ -62,21 +90,76 @@ To build each component cd into the component's directory and run `make` or run 
 Run experiments with `python3 run_experiment.py [your Emulab username]`.
 Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
 
-For Figure 3 choose a sequence space count and to double throughput double `--nproxies` and `--nproxy_leaders` and double the load `--nclients`.
+Each branch has the script `run_suite.sh`. This script will run enough experiments to recreate each figure. Though one trial each where in the paper we use 5 trials each and take the median throughput and median latencies.
 
-For Figure 4 double `--ncorfu_servers --nproxies --nproxy_leaders --nclients`.
+For the largest experiments some clients non-deterministically fail on startup. `run_suite.sh` will detect this, delete the corresponding `results-` dir and restart the experiment. If the user notices the failure during a run `^C` will terminate the run and `run_suite.sh` will still detect, delete, and restart the run.
 
-For Figure 5 double `--nservers --nproxies --nproxy_leaders --nclients`. 
+## Figure 3
+The easiest way is for the user to use `run_suite.sh` which will iterate through 1, 2, 4, 8, 16 proxies and 1, 2, 4, 8 sequence spaces increasing client load for each pair.
+Or choose a sequence space count and to double throughput double `--nproxies` and `--nproxy_leaders` and double the load `--nclients`.
+For example, after cloning the repo and setting up the machines as above a user can run the following to create on trial of each data point:
+
+    git checkout master
+    bash make_all.sh --clean
+    bash run_suite.sh <username>
+
+## Figure 4 
+Double `--ncorfu_servers --nproxies --nproxy_leaders --nclients`. Or:
+
+    git checkout corfu
+    bash make_all.sh --clean
+    bash run_suite.sh <username> --appends
+    bash run_suite.sh <username> --reads
+
+or for CorfuMason.
+
+    git checkout corfumason
+    bash make_all.sh --clean
+    bash run_suite.sh <username> --appends
+    bash run_suite.sh <username> --reads
+
+The default option of `--corfu_replication_factor` 2 should be used. This implies `--ncorfu_servers/--corfu_replication_factor` is the number of corfu shards. CorfuMason uses 6 replicated proxies per shard (the value used in `run_suite.sh`.)
+
+## Figure 5 
+Double `--nservers --nproxies --nproxy_leaders --nclients`. 
 
 `--nclient_concurrency` may need to be varied to find the right throughput/latency tradeoff.
 
-There are 3 hardcoded parameters for ZK-Mason getData experiments that neet to be set based on the number of ZK-Mason shards in the experiment: INIT_N_BLOCKS in common.h which controls the initial number of blocks in the bitmap that hols received sequence numbers, BYTES_PER_BLOCK in common.h which controls the size of the blocks, and GC_TIMER_US in proxy/proxy.h which controls how often the garbage collection leader proxy initiates garbage collection. They should be set to the following before compiling components:
+Or run a full suite for RSMKeeper:
+
+    git checkout rsmkeeper
+    bash make_all.sh --clean
+    bash run_suite.sh <username> --setDatas
+    bash run_suite.sh <username> --getDatas
+
+For ZK-Mason:
+
+    git checkout zk-mason
+    bash make_all.sh --clean
+    bash run_suite.sh <username> --setDatas
+
+The number of ratio of proxies to shards in `run_suite.sh` (2 replicated proxies per ZK shard) should be used if running manually with `run_experiment.py`.
+
+For ZK-Mason --getDatas experiments there are hardcoded parameters which need to be modified and all components then rebuilt depending on the number of shards in the experiment.
+The user, after building with the correct parameters (below) should modify the outer loop in `run_suite.sh` to only run for the shard configuration for which the user built.
+
+The 3 hardcoded parameters for ZK-Mason getData experiments that need to be set based on the number of ZK-Mason shards in the experiment: INIT_N_BLOCKS in common.h which controls the initial number of blocks in the bitmap that hols received sequence numbers, BYTES_PER_BLOCK in common.h which controls the size of the blocks, and GC_TIMER_US in proxy/proxy.h which controls how often the garbage collection leader proxy initiates garbage collection. They should be set to the following before compiling components:
 
     1 shard: 	INIT_N_BLOCKS: 1, BYTES_PER_BLOCK 65536,    GC_TIMER_US: 10000
     2 shards: 	INIT_N_BLOCKS: 8, BYTES_PER_BLOCK 65536*16, GC_TIMER_US: 10000
     4 shards: 	INIT_N_BLOCKS: 8, BYTES_PER_BLOCK 65536*16, GC_TIMER_US: 100000
     8 shards: 	INIT_N_BLOCKS: 1, BYTES_PER_BLOCK 65536,    GC_TIMER_US: 10000
 
-For Figure 5 (recovery) set `#define PLOT_RECOVERY 1` in common.h when building the components. This flag makes proxies connect to clients to send them noops and clients to record received sequence numbers. Run `python3 run_experiment.py [your Emulab username] --client_concurrency 8 --nclient_threads 16 --expduration 30 --nproxies 6 --nclients 4 --nsequence_spaces 4 --kill_leader 6 --nproxy_threads 8 --nproxy_leaders 16 --kill_sequencer 16` which kills a proxy leader and the sequencer 10 and 20 seconds into the experiment, respectively, after waiting 4 seconds for warmup. Then `cd` to `recovery/` and run `bash create_recovery_plot.sh`. You may need to install the `numpy` and `pandas` python3 packages. `pip3 install [package]`.
+## Figure 6 (recovery)
+Before building components set `#define PLOT_RECOVERY 1` in common.h and uncomment line 19 in `ltomake` `SESSION_CREDITS=64` so that client build with less `SESSION_CREDITS` to allow for proxy-to-client eRPC connections.
+The flag `PLOT_RECOVERY` makes proxies connect to clients to send them noops and clients to record received sequence numbers.
+Then rebuild all components `bash make_all.sh --clean`.
+Run:
+
+    python3 run_experiment.py <your Emulab username> --client_concurrency 8 --nclient_threads 16 --expduration 30 --nproxies 6 --nclients 4 --nsequence_spaces 4 --kill_leader 6 --nproxy_threads 8 --nproxy_leaders 16 --kill_sequencer 16;
+    cd recovery;
+    bash create_recovery_plot.sh;
+
+which kills a proxy leader and the sequencer 10 and 20 seconds into the experiment, respectively, after waiting 4 seconds for warmup. Then `cd`s to `recovery/` and runs `bash create_recovery_plot.sh`. You may need to install the `numpy` and `pandas` python3 packages. `pip3 install <package>`. This will output `recovery.pdf`.
 # How to parse data
 Run `bash parse_datfiles.sh results` to aggregate the throughput and show median client latencies. Output is `aggregrate-throughput 50 99 99.9 99.99 percentile`.

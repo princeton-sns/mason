@@ -534,7 +534,7 @@ class Experiment:
         time.sleep(time_to_kill)
 
         # kill the sequencer now
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.primary_sequencer['machineid'])
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.primary_sequencer['machineid'])
         kill_keyword = '\./[s]equencer'
         cmd = "%s 'sudo pkill -f -9 \"%s\"'" % (ssh, kill_keyword)
         print(cmd)
@@ -554,7 +554,7 @@ class Experiment:
 
         print("killing a leader for failover... %s" % self.available_proxies[self.proxy_list[0]])
         # kill a leader now
-        ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.available_proxies[self.proxy_list[0]]['machineid'])
+        ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.available_proxies[self.proxy_list[0]]['machineid'])
         kill_keyword = 'proxy'
         cmd = "%s 'sudo pkill -f -9 \"./%s\"'" % (ssh, kill_keyword)
         cmd = shlex.split(cmd)
@@ -577,7 +577,7 @@ class Experiment:
         for i in range(0, len(self.proxy_list), 3):
             print("killing a leader for failover... %s" % self.available_proxies[self.proxy_list[i]])
             # kill a leader now
-            ssh = "ssh -p 22 %s@%s.emulab.net" % (self.whoami, self.available_proxies[self.proxy_list[i]]['machineid'])
+            ssh = "ssh -p 22 %s@%s.emulab.net -o StrictHostKeyChecking=no" % (self.whoami, self.available_proxies[self.proxy_list[i]]['machineid'])
             kill_keyword = 'proxy'
             cmd = "%s 'sudo pkill -f -9 \"./%s\"'" % (ssh, kill_keyword)
             cmd = shlex.split(cmd)
