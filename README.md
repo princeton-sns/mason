@@ -25,7 +25,7 @@ On Emulab use the `mason` profile under the project `Mason`.
 This profile contains d430s connected with 10Gb NICs, with nodes: sequencer-0, sequencer-1, proxy-#, client-#, server-#. 
 There is also a genilib script `emulab_genilib` in this repository you can use to create the same profile.
 
-More explicit instructions from a previous user which work for Emulab as well as CloudLab (all of our experiment were conducted over Emulab):
+More explicit instructions from a previous user which work for Emulab as well as CloudLab (all of our experiments were conducted over Emulab):
 
     You can find this profile on CloudLab as follows.
     * From the menu, choose "Experiments -> Start Experiment".
@@ -85,9 +85,11 @@ Proxies always use 16. Master branch sequencer uses 8.
 Corfu's sequencer and servers use 8. CorfuMason/ZK-Mason uses 4 for servers and the sequencer. -->
 Note that if you are configuring `SESSION_CREDITS`, clients must have `--client_concurrency <= kSessionCredits` otherwise proxies may deadlock waiting for client requests to ensure client-determined order.
 
-To build each component cd into the component's directory and run `make` or run `bash make_all.sh`.
+To build each component run `bash make_all.sh` or cd into the component's directory and run `make`.
 
 Run experiments with `python3 run_experiment.py [your Emulab username]`.
+Run `bash parse_datfiles.sh results` to aggregate the throughput and show median client latencies.
+Output is `aggregrate-throughput 50 99 99.9 99.99 percentile`.
 Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
 
 Each branch has the script `run_suite.sh`. This script will run enough experiments to recreate each figure. Though one trial each where in the paper we use 5 trials each and take the median throughput and median latencies.
