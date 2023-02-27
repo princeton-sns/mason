@@ -314,11 +314,12 @@ class Experiment:
         if machine_type == 'sequencer':
             cmd += " --nleaders %d" % self.nproxy_leaders
             if machine_name.split("-")[1] != "0":
-                proxy_ips = ",".join([self.available_proxies[p]["ctrl_ip"] 
-                        for p in self.proxy_list])
-                cmd += " --other_ips %s" % proxy_ips
-                cmd += " --am_backup"
-                cmd += " --out_dir %s" % self.tmpdir;
+                pass
+                # proxy_ips = ",".join([self.available_proxies[p]["ctrl_ip"] 
+                #         for p in self.proxy_list])
+                # cmd += " --other_ips %s" % proxy_ips
+                # cmd += " --am_backup"
+                # cmd += " --out_dir %s" % self.tmpdir;
 
         # Dump program output to file to make sure things don't go wrong
         cmd += " &> %s/%s.log" % (self.tmpdir, machine_name)
