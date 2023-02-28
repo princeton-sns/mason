@@ -14,7 +14,7 @@ This repo contains 5 branches:
 
 This repo also contains a modified version of [eRPC](https://github.com/erpc-io/eRPC) and uses code from [willemt/raft](https://github.com/willemt/raft) which is contained in the Emulab disk image.
 
-Note: if you run into problems please check the Troubleshooting section at the bottom.
+Note: if you run into problems please check the [Troubleshooting](#troubleshooting) section at the bottom.
 
 # Setting up machines
 These instructions are for Mason on Emulab with d430s running Ubuntu 18.04. These directions install and configure DPDK/hugepages for use with eRPC, and gather information from each machine to facilitate automated experiment-launching. 
@@ -36,17 +36,14 @@ More explicit instructions from a previous user which work for Emulab as well as
     * Scroll down in the list if necessary, and choose the "Mason" profile.
     Then click the "Select Profile" button and proceed with the usual experiment-instantiation process.
 
-Proxies should be a multiple of 3, servers a multiple of 2 for Corfu and 3 for ZooKeeper.
-The default machine numbers are a minimal setup for ZK-Mason.
+<!-- Proxies should be a multiple of 3, servers a multiple of 2 for Corfu and 3 for ZooKeeper. -->
+The default machine numbers are the largest setup for corfumason.
 
-The largest setup is the corfumason 4 shard configuration with 2 sequencers (primary and standby),
-72 proxies, 24 clients, and 8 servers. 
+We recommend starting an experiment with the largest setup (corfumason) and then modifying `setup/machine_info.txt` to later change the configuration (described more below).
 
-We recommend swapping in the largest setup (corfumason) and then modifying `setup/machine_info.txt` manually after setting up the machines with DPDK (described below).
+Once an experiment has started `ssh` into any node (e.g. proxy-0) and clone this repository; we recommend cloning into `/proj/your-project/` to avoid disk usage quota issues when running experiments. 
 
-Once an experiment is swapped in `ssh` into any node (e.g. proxy-0) and clone this repository; we recommend cloning into `/proj/your-project/` to avoid disk usage quota issues when running experiments. 
-
-On Emulab cloning to this directory or your home directory should clone it to every node through Emulab's NFS.
+On Emulab cloning to this directory or your home directory should clone it to every node through Emulab's NFS. If this doesn't work see [Troubleshooting](#Troubleshooting).
 
 `cd` into the `setup/` directory in this repo.
 Copy the experiment "List View" from Emulab into `setup/machine_list.txt`. The file should look something like this:
@@ -58,7 +55,10 @@ Copy the experiment "List View" from Emulab into `setup/machine_list.txt`. The f
     proxy-2	    pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
     client-0	pc###	d430	ready	n/a	project/image ssh -p 22 username@pc###.emulab.net
 
-Then run `python3 parse_machine_list.py [your Emulab username]`. This script parses the list of machines from `machine_list.txt`, sets up hugepages and DPDK, and outputs `machine_info.txt`. Ensure setup completed successfully with status 0.
+Then run `python3 parse_machine_list.py [your Emulab username]`.
+This script parses the list of machines from `machine_list.txt`, sets up hugepages and DPDK, and outputs `machine_info.txt`.
+Ensure setup completed successfully with status 0.
+If you run into an indexing issue or if there problems `ssh`'ing, for example many permission denied errors, see [Troubleshooting](#troubleshooting).
 
 # How to run an experiment
 To make all components run `bash make_all.sh`.
@@ -80,11 +80,17 @@ Run `bash parse_datfiles.sh results` to aggregate the throughput and show median
 Output is `aggregrate-throughput 50 99 99.9 99.99 percentile`.
 Default values are set in each branch to get the highest throughput at reasonable latency on the smallest scale experiment in the paper.
 
-Each branch has the script `run_suite.sh`. This script will run enough experiments to recreate each figure. Though one trial each where in the paper we use 5 trials each and take the median throughput and median latencies.
+Each branch has the script `run_suite.sh`. This script will run enough experiments to recreate each figure. Though one trial each where in the paper we use 5 trials each and take the median throughput and median latencies. To run fewer experiments or on a smaller setup modify the loop parameters in `run_suite.sh`.
 
 For the largest experiments some clients non-deterministically fail on startup. `run_suite.sh` will detect this, delete the corresponding `results-` dir and restart the experiment. If the user notices the failure during a run `^C` will terminate the run and `run_suite.sh` will still detect, delete, and restart the run.
 
 We include the largest configuration for each figure below. To assign nodes to a different role (proxy/server/client), after setting up the machines with DPDK, you can change the name manually in `machine_info.txt` and then use `run_experiment.py` (or `run_suite.sh`).
+To change a machine type, for example from a proxy to a server, open `setup/machine_info.txt`
+choose which proxy to change and replace `proxy-#` to `server-#`. 
+The main experiment script `run_experiment.py` will use the names to determine the type of machine.
+For example, after running the largest corfumason experiment, you can change some proxies to servers to make 24 servers.
+
+Note if you are running with smaller configurations than the largest configurations we give below, then proxies should be a multiple of 3, servers a multiple of 2 for Corfu and 3 for ZooKeeper.
 
 ## Figure 3
 Largest configurations: 
@@ -179,6 +185,12 @@ Run `bash parse_datfiles.sh results` to aggregate the throughput and show median
 When using the `parse_machine_list.py` script, one user had an indexing issue which caused the an `ssh` command to be incorrect.
 If you run into this issue their solution was to change change the 6 to a 7 on line 102: `ssh = " ".join(fields[6:]) + " -o StrictHostKeyChecking=no "` -> `ssh = " ".join(fields[7:]) + " -o StrictHostKeyChecking=no "`.
 
-Note: some users experienced problems with `ssh` keys when using CloudLab. To solve these problems the user added an extra `ssh` key: "Add an extra ssh key to cloud lab (this is because the easiest way to setup ssh between cloud lab nodes in an experiment is to copy a private key onto one of the nodes); I created an additional/extra key so I can delete this key after the artifact evaluation for privacy/safety", `ssh`'ed into a node, and uploaded the private key "Upload your private ssh key onto the node and run the following commands: `chmod 600 /your/priv/key eval “$(ssh-agent -s)” ssh-add /your/priv/key"`.
+Note: some users experienced problems with `ssh` keys when using CloudLab. To solve these problems the user added an extra `ssh` key: "Add an [extra ssh key](https://docs.github.com/en/authentication/connecting-to-github-with-ssh/generating-a-new-ssh-key-and-adding-it-to-the-ssh-agent) to cloud lab (this is because the easiest way to setup ssh between cloud lab nodes in an experiment is to copy a private key onto one of the nodes); I created an additional/extra key so I can delete this key after the artifact evaluation for privacy/safety", `ssh`'ed into a node, and uploaded the private key "Upload your private ssh key onto the node and run the following commands: "
+    
+    chmod 600 /your/priv/key 
+    eval “$(ssh-agent -s)” 
+    ssh-add /your/priv/key
 
-One user had a problem with Emulab/Cloudlab not syncing the cloned directory over NFS and their solution was to modify `parse_machine_list.py` to clone the repo on each node: "Replace line 188 and 189 (https://github.com/masonj2022/mason/blob/24da3117d02270adbbd329873fb4514f605304fe/setup/parse_machine_list.py#L188) with `setup_cmd = ("cd ~; git clone https://github.com/masonj2022/mason; cd mason/setup; sudo bash dpdk_apt_setup.sh %s %s" % (machines[machine]['iface1'], machines[machine]['iface2']))` Alternatively, you can ssh into each machine and manually clone the repo before running the setup script."
+Another solution is to insert `-i <privkey>` to all ssh paths specified in `parse_machine_list.py` and `run_experiment.py`.
+
+One user had a problem with Emulab/Cloudlab not syncing the cloned directory over NFS and their solution was to modify `parse_machine_list.py` to clone the repo on each node: "Replace line 188 and 189 (ht<span>tps://</span>github.com/masonj2022/mason/blob/24da3117d02270adbbd329873fb4514f605304fe/setup/parse_machine_list.py#L188) with `setup_cmd = ("cd ~; git clone https://github.com/masonj2022/mason; cd mason/setup; sudo bash dpdk_apt_setup.sh %s %s" % (machines[machine]['iface1'], machines[machine]['iface2']))` Alternatively, you can ssh into each machine and manually clone the repo before running the setup script."
