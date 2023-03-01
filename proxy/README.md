@@ -1,5 +1,5 @@
 The proxy component is the scalable layer in between clients and the rest of the
-service. Proxies are replicated over Raft. The typically message pattern is: clients
+service. Proxies are replicated over Raft. The typical message pattern is: clients
 send an operation to proxies, which request a multi-sequence number from the sequencer,
 replicate to other proxies in its group, send the operation to the service's shards,
 and reply to the client.
